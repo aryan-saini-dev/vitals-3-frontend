@@ -45,7 +45,7 @@
     --shadow-pop: 4px 4px 0px 0px hsl(215 28% 17%);
     --shadow-pop-hover: 6px 6px 0px 0px hsl(215 28% 17%);
     --shadow-pop-active: 2px 2px 0px 0px hsl(215 28% 17%);
-    --shadow-soft: 8px 8px 0px 0px hsl(214 32% 91%);
+    --shadow-soft: 8px 8px 0px 0px hsl(215 20% 65%);
     --shadow-pink: 8px 8px 0px 0px hsl(330 86% 71%);
 
     --font-heading: 'Outfit', system-ui, sans-serif;

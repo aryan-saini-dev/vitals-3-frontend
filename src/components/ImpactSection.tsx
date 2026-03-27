@@ -1,4 +1,5 @@
 import { Stethoscope, HeartPulse, Users } from "lucide-react";
+import doctorDashboard from "@/assets/doctor-dashboard.png";
 
 const impacts = [
   {
@@ -46,6 +47,23 @@ const ImpactSection = () => {
           <h2 className="font-heading font-extrabold text-3xl md:text-5xl">
             Who <span className="text-quaternary">Benefits</span>?
           </h2>
+        </div>
+
+        {/* Doctor dashboard illustration */}
+        <div className="flex justify-center mb-12">
+          <div className="relative bg-card border-2 border-foreground rounded-2xl shadow-pop p-4 max-w-lg">
+            <img
+              src={doctorDashboard}
+              alt="Doctor reviewing AI-powered health dashboard"
+              width={800}
+              height={600}
+              loading="lazy"
+              className="w-full rounded-lg"
+            />
+            <div className="absolute -top-3 -right-3 px-3 py-1 rounded-full bg-tertiary text-tertiary-foreground font-heading font-bold text-xs border-2 border-foreground shadow-pop">
+              AI Dashboard
+            </div>
+          </div>
         </div>
 
         <div className="grid md:grid-cols-3 gap-8 items-start">

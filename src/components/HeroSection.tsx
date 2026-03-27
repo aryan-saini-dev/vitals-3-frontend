@@ -1,4 +1,5 @@
 import { ArrowRight, Phone, Brain, ShieldCheck } from "lucide-react";
+import heroIllustration from "@/assets/hero-illustration.png";
 
 const HeroSection = () => {
   return (
@@ -62,33 +63,31 @@ const HeroSection = () => {
               backgroundSize: '16px 16px',
             }}
           />
-          {/* Main visual card */}
-          <div className="relative bg-card border-2 border-foreground rounded-3xl shadow-pop p-8 md:p-10 space-y-6 max-w-sm w-full">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-full bg-primary flex items-center justify-center">
-                <Phone className="w-6 h-6 text-primary-foreground" strokeWidth={2.5} />
-              </div>
-              <div>
-                <p className="font-heading font-bold text-lg">Voice Check-in</p>
-                <p className="text-sm text-muted-foreground">Active Session</p>
-              </div>
-            </div>
-            <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-quaternary animate-pulse" />
-                <span className="text-sm font-medium">Symptom Correlation Active</span>
-              </div>
-              <div className="bg-muted rounded-lg p-3 blob-radius">
-                <p className="text-sm text-muted-foreground italic">"Have you noticed any metallic taste recently? This could indicate a change in your condition..."</p>
-              </div>
-              <div className="flex gap-2">
-                <span className="px-3 py-1 rounded-full bg-quaternary text-quaternary-foreground text-xs font-bold border-2 border-foreground">Low Risk</span>
-                <span className="px-3 py-1 rounded-full bg-tertiary text-tertiary-foreground text-xs font-bold border-2 border-foreground">Monitoring</span>
-              </div>
-            </div>
+          {/* Hero illustration */}
+          <div className="relative">
+            <img
+              src={heroIllustration}
+              alt="AI healthcare robot assisting a patient with voice check-in"
+              width={800}
+              height={800}
+              className="w-full max-w-md mx-auto drop-shadow-lg"
+            />
             {/* Floating badge */}
             <div className="absolute -top-4 -right-4 w-16 h-16 rounded-full bg-secondary flex items-center justify-center border-2 border-foreground shadow-pop animate-float">
               <ShieldCheck className="w-8 h-8 text-secondary-foreground" strokeWidth={2.5} />
+            </div>
+            {/* Small voice check-in card overlay */}
+            <div className="absolute bottom-4 -left-4 bg-card border-2 border-foreground rounded-xl shadow-pop p-3 max-w-[200px]">
+              <div className="flex items-center gap-2 mb-1">
+                <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
+                  <Phone className="w-4 h-4 text-primary-foreground" strokeWidth={2.5} />
+                </div>
+                <span className="font-heading font-bold text-xs">Voice Check-in</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-full bg-quaternary animate-pulse" />
+                <span className="text-[10px] text-muted-foreground">Active Session</span>
+              </div>
             </div>
           </div>
         </div>

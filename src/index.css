@@ -22,7 +22,7 @@
     --secondary-foreground: 0 0% 100%;
 
     --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
+    --muted-foreground: 215 20% 32%;
 
     --accent: 263 90% 66%;
     --accent-foreground: 0 0% 100%;
@@ -45,7 +45,7 @@
     --shadow-pop: 4px 4px 0px 0px hsl(215 28% 17%);
     --shadow-pop-hover: 6px 6px 0px 0px hsl(215 28% 17%);
     --shadow-pop-active: 2px 2px 0px 0px hsl(215 28% 17%);
-    --shadow-soft: 8px 8px 0px 0px hsl(214 32% 91%);
+    --shadow-soft: 8px 8px 0px 0px hsl(215 20% 65%);
     --shadow-pink: 8px 8px 0px 0px hsl(330 86% 71%);
 
     --font-heading: 'Outfit', system-ui, sans-serif;
@@ -73,7 +73,7 @@
     --secondary: 330 86% 71%;
     --secondary-foreground: 0 0% 100%;
     --muted: 217 33% 18%;
-    --muted-foreground: 215 20% 65%;
+    --muted-foreground: 215 20% 55%;
     --accent: 263 90% 66%;
     --accent-foreground: 0 0% 100%;
     --destructive: 0 63% 31%;

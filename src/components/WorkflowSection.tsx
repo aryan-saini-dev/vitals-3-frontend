@@ -1,4 +1,5 @@
 import { PhoneCall, Mic, Database, Activity, ThumbsUp } from "lucide-react";
+import workflowIllustration from "@/assets/workflow-illustration.png";
 
 const steps = [
   {
@@ -46,13 +47,25 @@ const WorkflowSection = () => {
       />
 
       <div className="relative max-w-6xl mx-auto">
-        <div className="text-center mb-16 space-y-4">
+        <div className="text-center mb-12 space-y-4">
           <span className="inline-block px-4 py-2 rounded-full bg-quaternary text-quaternary-foreground font-heading font-bold text-sm border-2 border-foreground shadow-pop">
             Technical Workflow
           </span>
           <h2 className="font-heading font-extrabold text-3xl md:text-5xl">
             The <span className="text-secondary">5-Step</span> Pipeline
           </h2>
+        </div>
+
+        {/* Workflow illustration */}
+        <div className="flex justify-center mb-12">
+          <img
+            src={workflowIllustration}
+            alt="Healthcare AI workflow pipeline illustration"
+            width={1200}
+            height={512}
+            loading="lazy"
+            className="w-full max-w-3xl opacity-80"
+          />
         </div>
 
         <div className="relative space-y-8 md:space-y-0 md:grid md:grid-cols-5 md:gap-4">

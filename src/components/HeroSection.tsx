@@ -1,4 +1,5 @@
 import { ArrowRight, Phone, Brain, ShieldCheck } from "lucide-react";
+import { Link } from "react-router-dom";
 import heroIllustration from "@/assets/hero-illustration.png";
 
 const HeroSection = () => {
@@ -41,15 +42,15 @@ const HeroSection = () => {
           </p>
 
           <div className="flex flex-wrap gap-4">
-            <button className="group inline-flex items-center gap-3 px-8 py-4 rounded-full bg-primary text-primary-foreground font-heading font-bold border-2 border-foreground shadow-pop hover:shadow-pop-hover hover:-translate-x-0.5 hover:-translate-y-0.5 active:shadow-pop-active active:translate-x-0.5 active:translate-y-0.5 transition-all duration-300 ease-bounce">
+            <Link to="/dashboard" className="group inline-flex items-center gap-3 px-8 py-4 rounded-full bg-primary text-primary-foreground font-heading font-bold border-2 border-foreground shadow-pop hover:shadow-pop-hover hover:-translate-x-0.5 hover:-translate-y-0.5 active:shadow-pop-active active:translate-x-0.5 active:translate-y-0.5 transition-all duration-300 ease-bounce">
               Get Started
               <span className="w-8 h-8 rounded-full bg-card flex items-center justify-center">
                 <ArrowRight className="w-4 h-4 text-foreground" strokeWidth={2.5} />
               </span>
-            </button>
-            <button className="inline-flex items-center gap-2 px-8 py-4 rounded-full border-2 border-foreground font-heading font-bold hover:bg-tertiary transition-all duration-300 ease-bounce">
-              Learn More
-            </button>
+            </Link>
+            <Link to="/dashboard" className="inline-flex items-center gap-2 px-8 py-4 rounded-full border-2 border-foreground font-heading font-bold hover:bg-tertiary transition-all duration-300 ease-bounce">
+              Dashboard
+            </Link>
           </div>
         </div>
 

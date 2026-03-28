@@ -23,7 +23,10 @@ export default function Alerts() {
         supabase.from("agents").select("*").eq("docuuid", user.id)
       ]);
       
-      if (alertsRes.error) console.error("Alerts Err:", alertsRes.error);
+      if (alertsRes.error) {
+         console.error("ALERTS DB ERROR:", alertsRes.error.message, alertsRes.error.details);
+         alert(`Supabase Error Fetching Alerts:\n${alertsRes.error.message}\nMake sure your alerts table has created_at and docuuid columns.`);
+      }
 
       if (alertsRes.data) {
         const merged = alertsRes.data.map(alert => {

@@ -48,7 +48,7 @@ export default function CallDetail() {
         <ArrowLeft className="w-5 h-5 mr-2" /> Back to Calls
       </Link>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
          {/* Left Col: Vitals & Metadata */}
          <div className="space-y-6">
             <div className="bg-card border-2 border-border shadow-soft rounded-xl p-6 md:p-8 relative overflow-hidden group">
@@ -101,7 +101,7 @@ export default function CallDetail() {
                          <div key={key} className={`p-4 rounded-xl border-2 border-border shadow-[4px_4px_0_0_#1E293B] ${color} text-white hover:-translate-y-1 transition-transform`}>
                            <Icon className="w-6 h-6 mb-2" />
                            <p className="text-xs font-bold uppercase tracking-widest opacity-80 mb-1">{key}</p>
-                           <p className="text-2xl font-heading font-extrabold tracking-tight">{String(value)}</p>
+                           <p className="text-lg font-heading font-extrabold tracking-tight break-words leading-tight">{String(value)}</p>
                          </div>
                        )
                     })}
@@ -111,7 +111,7 @@ export default function CallDetail() {
          </div>
 
          {/* Right Col: Transcript */}
-         <div className="lg:col-span-2 bg-card border-2 border-border shadow-soft rounded-xl p-6 md:p-8 flex flex-col h-[700px]">
+         <div className="lg:col-span-2 bg-card border-2 border-border shadow-soft rounded-xl p-6 md:p-8 flex flex-col h-[600px] lg:h-[calc(100vh-12rem)]">
             <h3 className="text-2xl font-heading font-extrabold pb-4 border-b-2 border-border border-dashed tracking-tight mb-6 shrink-0">
                Call Transcript
             </h3>

@@ -20,6 +20,7 @@ import CreateAgent from "./pages/dashboard/CreateAgent.tsx";
 import Alerts from "./pages/dashboard/Alerts.tsx";
 import Calls from "./pages/dashboard/Calls.tsx";
 import CallDetail from "./pages/dashboard/CallDetail.tsx";
+import SimulateCall from "./pages/dashboard/SimulateCall.tsx";
 
 const queryClient = new QueryClient();
 
@@ -64,6 +65,7 @@ const App = () => (
               <Route path="agents/create" element={<CreateAgent />} />
               <Route path="alerts" element={<Alerts />} />
               <Route path="calls" element={<Calls />} />
+              <Route path="calls/simulate" element={<SimulateCall />} />
               <Route path="calls/:id" element={<CallDetail />} />
             </Route>
 

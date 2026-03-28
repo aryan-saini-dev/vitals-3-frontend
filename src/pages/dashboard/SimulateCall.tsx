@@ -1,321 +1,378 @@
 import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/lib/AuthContext";
-import { supabase } from "@/lib/supabase";
-import { createPatientChatSession, generateDoctorSummary } from "@/lib/gemini";
-import { useSpeech } from "@/lib/useSpeech";
-import { Bot, Phone, PhoneOff, Mic, Activity, CheckCircle, AlertTriangle } from "lucide-react";
+// import { supabase } from "@/lib/supabase"; // Bypassed for Mock Demo
+// import { createPatientChatSession, generateDoctorSummary } from "@/lib/gemini"; // Bypassed for Mock Demo
+import { 
+  Bot, Phone, PhoneOff, Activity, CheckCircle, 
+  AlertTriangle, User, Calendar, Clipboard, 
+  ChevronRight, Volume2, Shield, HeartPulse, Send, MessageCircle, Sparkles
+} from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
+type CallPhase = "idle" | "ringing" | "active" | "analyzing" | "completed";
+
+// --- MOCK DATA FOR DEMO ---
+const MOCK_PATIENTS = [
+  { id: "p1", name: "Sarah Jenkins", condition: "Chronic Heart Failure", age: 68, risk: "high" },
+  { id: "p2", name: "Robert Chen", condition: "Type 2 Diabetes", age: 54, risk: "medium" },
+  { id: "p3", name: "Elena Rodriguez", condition: "COPD / Respiratory", age: 72, risk: "low" }
+];
+
+const MOCK_AI_PHRASES = [
+  "I've noted that. Have you noticed any unusual swelling in your ankles today?",
+  "That's important information for your care team. Are you feeling any shortness of breath while resting?",
+  "Thank you for sharing. Have you been consistent with your prescribed medication this morning?",
+  "I understand. On a scale of 1-10, how would you rate your fatigue right now?",
+  "I'm recording this for Dr. Smith. Based on what you've said, we should monitor your oxygen levels closely.",
+  "That sounds manageable, but let's stay vigilant. Are there any other symptoms you'd like to report?"
+];
+
 export default function SimulateCall() {
+  // Contexts/Navigation
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [patients, setPatients] = useState<any[]>([]);
+  
+  // States
   const [selectedPatientId, setSelectedPatientId] = useState("");
-  const [callState, setCallState] = useState<"idle" | "ringing" | "active" | "analyzing" | "completed">("idle");
-  const [chatSession, setChatSession] = useState<any>(null);
+  const [phase, setPhase] = useState<CallPhase>("idle");
   const [transcriptLog, setTranscriptLog] = useState<{role: "user" | "agent", text: string}[]>([]);
   const [processingUserTurn, setProcessingUserTurn] = useState(false);
   const [summaryData, setSummaryData] = useState<any>(null);
   const [startTime, setStartTime] = useState<number>(0);
+  const [duration, setDuration] = useState(0);
+  const [chatInput, setChatInput] = useState("");
+  const [mockResponseIndex, setMockResponseIndex] = useState(0);
 
+  // Refs
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const { listen, stopListening, isListening, transcript: liveTranscript, speak, stopSpeaking } = useSpeech();
-
-  // Load Patients
+  // Timer logic
   useEffect(() => {
-    async function fetchPatients() {
-      if (!user) return;
-      const { data } = await supabase.from("patients").select("*").eq("docuuid", user.id);
-      if (data) setPatients(data);
+    if (phase === "active") {
+      setStartTime(Date.now());
+      timerRef.current = setInterval(() => {
+        setDuration(Math.floor((Date.now() - (startTime || Date.now())) / 1000));
+      }, 1000);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
     }
-    fetchPatients();
-  }, [user]);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [phase, startTime]);
 
   // Auto-scroll transcript
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [transcriptLog, liveTranscript]);
+  }, [transcriptLog, processingUserTurn]);
 
   const handleStartCall = async () => {
     if (!selectedPatientId) return;
-    const patientObj = patients.find(p => p.id === selectedPatientId);
     
-    setCallState("ringing");
+    setPhase("ringing");
     setTranscriptLog([]);
-    setStartTime(Date.now());
+    setDuration(0);
+    setMockResponseIndex(0);
     
-    try {
-      // Connect specifically trained Gemini instance
-      const session = await createPatientChatSession(patientObj);
-      setChatSession(session);
-      
-      setCallState("active");
-      
-      const prompt = `Start the conversation organically. Introduce yourself as their VITALS care assistant and ask how they are feeling today.`;
-      
-      const result = await session.sendMessage(prompt);
-      const aiResponse = result.response.text();
-      
-      setTranscriptLog(prev => [...prev, { role: "agent", text: aiResponse }]);
-      speak(aiResponse, () => {
-         listen(); // Automatically listen when AI finishes speaking
-      });
-      
-    } catch (err: any) {
-      console.error(err);
-      alert("Failed to initialize Gemini. Did you set VITE_GEMINI_API_KEY?");
-      setCallState("idle");
-    }
+    // DELAY FOR IMMERSION
+    setTimeout(() => {
+        setPhase("active");
+        const patient = MOCK_PATIENTS.find(p => p.id === selectedPatientId);
+        const intro = `Hello, I'm your Vitals Assistant. I'm checking in on your ${patient?.condition} management today. How are you feeling this morning?`;
+        setTranscriptLog([{ role: "agent", text: intro }]);
+    }, 2000);
   };
 
-  const handleUserTurnEnd = async () => {
-    if (!liveTranscript.trim() || !chatSession) return;
+  async function handleSendMessage(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    if (!chatInput.trim() || processingUserTurn) return;
     
-    const textToSubmit = liveTranscript;
-    stopListening(); // Stop immediately so we lock the text
+    const textToSubmit = chatInput;
+    setChatInput("");
     setProcessingUserTurn(true);
-    
     setTranscriptLog(prev => [...prev, { role: "user", text: textToSubmit }]);
     
-    try {
-       const result = await chatSession.sendMessage(textToSubmit);
-       const aiResponse = result.response.text();
-       
+    // SIMULATE AI THINKING
+    setTimeout(() => {
+       const aiResponse = MOCK_AI_PHRASES[mockResponseIndex % MOCK_AI_PHRASES.length];
+       setMockResponseIndex(prev => prev + 1);
        setTranscriptLog(prev => [...prev, { role: "agent", text: aiResponse }]);
-       speak(aiResponse, () => {
-          listen(); // Resume listening when AI finishes
-       });
-    } catch (e) {
-       console.error("Gemini Response Failed", e);
-    } finally {
        setProcessingUserTurn(false);
-    }
+    }, 1500);
+  }
+
+  const handleHangUp = async () => {
+    setPhase("analyzing");
+    
+    const patientObj = MOCK_PATIENTS.find(p => p.id === selectedPatientId);
+
+    // MOCK SUMMARY GENERATION
+    setTimeout(() => {
+      const mockSummary = {
+        summary: `Patient ${patientObj?.name} reported moderate symptom progression related to ${patientObj?.condition}. Overall stability is ${patientObj?.risk === 'high' ? 'concerning' : 'maintaining'}.`,
+        risk_level: patientObj?.risk || "medium",
+        alert_type: patientObj?.risk === 'high' ? "Severe Fluid Retention" : "Routine Check-in Analysis",
+        symptoms: ["Mild Edema", "Increased Fatigue", "Normal BP"],
+        vitals_data: { 
+           Weight: "184 lbs (+2.4)", 
+           Blood_Pressure: "132/88",
+           Oxygen: "96%"
+        },
+        action_required: patientObj?.risk === 'high' ? "Schedule Urgent In-Person Review" : "Continue Current Medication Path"
+      };
+      
+      setSummaryData(mockSummary);
+      setPhase("completed");
+    }, 2500);
   };
 
-  const handUpAndAnalyze = async () => {
-    stopListening();
-    stopSpeaking();
-    setCallState("analyzing");
-    
-    const durationSec = Math.floor((Date.now() - startTime) / 1000);
-    const patientObj = patients.find(p => p.id === selectedPatientId);
-    
-    // Format transcript for Gemini Tool
-    const flatTranscript = transcriptLog.map(t => `${t.role === 'agent' ? 'Agent' : 'Patient'}: ${t.text}`).join("\n\n");
-    
-    try {
-      const summary = await generateDoctorSummary(flatTranscript);
-      setSummaryData(summary);
-      
-      // Save Call
-      const { error: callError } = await supabase.from("calls").insert({
-        docuuid: user!.id,
-        patient_id: patientObj.id,
-        agent_id: patientObj.assigned_agent_id || null, // Best effort link
-        duration_seconds: durationSec,
-        transcript: flatTranscript,
-        vitals_data: { 
-           ...summary.vitals_data, 
-           AI_Diagnosis_Risk: summary.alert_type,
-           Symptom_Tags: summary.symptoms,
-           Patient_Status: summary.risk_level.toUpperCase() 
-        }
-      });
-      console.log("Call Saved", callError);
-
-      // Trigger High Risk Alert if needed
-      if (summary.risk_level === "high" || summary.risk_level === "medium") {
-         await supabase.from("alerts").insert({
-            docuuid: user!.id,
-            patient_id: patientObj.id,
-            agent_id: patientObj.assigned_agent_id || null,
-            alert_type: summary.alert_type,
-            severity: summary.risk_level,
-            status: "open"
-         });
-      }
-      
-      setCallState("completed");
-    } catch (e) {
-      console.error("Post-call analysis failed", e);
-      alert("Post-call analysis failed. Check console constraints.");
-      setCallState("idle"); 
-    }
+  const formatTime = (s: number) => {
+    const mins = Math.floor(s / 60);
+    const secs = s % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between">
-         <div>
-           <h1 className="text-4xl font-heading font-extrabold text-foreground tracking-tight">AI Call Simulation</h1>
-           <p className="mt-2 text-muted-foreground font-medium flex items-center gap-2">Gemini 2.5 Active Reasoning + Native Web Speech <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse hidden md:block" /></p>
-         </div>
-         <div className="w-16 h-16 rounded-full bg-quaternary opacity-80 mix-blend-multiply blur-xl animate-float"></div>
+    <div className="min-h-[80vh] flex flex-col items-center justify-center p-4 md:p-8 relative">
+      {/* Background Blobs */}
+      <div className="fixed inset-0 overflow-hidden -z-10 opacity-30 pointer-events-none">
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/20 rounded-full blur-3xl" />
+        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-secondary/20 rounded-full blur-3xl" />
       </div>
 
-      {callState === "idle" && (
-        <div className="bg-card border-2 border-border shadow-soft rounded-xl p-8 flex flex-col items-center">
-           <div className="w-20 h-20 rounded-full bg-accent flex items-center justify-center text-white border-2 border-border shadow-pop mb-6">
-             <Bot className="w-10 h-10" />
+      {phase === "idle" && (
+        <div className="max-w-2xl w-full bg-card/80 backdrop-blur-xl border-2 border-border p-10 rounded-[32px] shadow-soft text-center space-y-8 animate-in fade-in zoom-in duration-300">
+           <div className="flex items-center justify-center gap-3 mb-2">
+              <span className="px-4 py-1.5 bg-tertiary/20 text-foreground text-xs font-black uppercase tracking-[0.2em] rounded-full border-2 border-tertiary/40">Demo Mode Active</span>
            </div>
-           <h2 className="text-2xl font-heading font-extrabold mb-4">Start Simulated Web-Call</h2>
-           <p className="text-muted-foreground text-center max-w-md mb-8">
-             Select a patient from your dashboard to initiate a live voice call. The AI will dynamically analyze their chronic medical history before speaking.
-           </p>
+
+           <div className="w-24 h-24 bg-tertiary mx-auto rounded-full flex items-center justify-center border-4 border-white shadow-pop">
+             <Bot className="w-12 h-12 text-foreground" />
+           </div>
            
-           <div className="w-full max-w-sm flex flex-col gap-4">
-             <select 
-               className="w-full p-4 rounded-xl border-2 border-border bg-background font-bold text-foreground outline-none focus:border-accent transition-colors"
-               value={selectedPatientId}
-               onChange={(e) => setSelectedPatientId(e.target.value)}
-             >
-               <option value="" disabled>-- Select Patient --</option>
-               {patients.map(p => (
-                 <option key={p.id} value={p.id}>{p.name} ({p.condition})</option>
-               ))}
-             </select>
+           <div className="space-y-3">
+             <h1 className="text-4xl font-heading font-extrabold tracking-tight">AI Patient Chat</h1>
+             <p className="text-muted-foreground font-medium text-lg">
+               Simulate clinical triage with our zero-latency demo engine. No API key required.
+             </p>
+           </div>
+
+           <div className="space-y-4 max-w-sm mx-auto pt-4">
+             <div className="relative">
+                <User className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground w-5 h-5" />
+                <select 
+                  className="w-full pl-12 pr-4 py-4 rounded-2xl border-2 border-border bg-background focus:border-primary outline-none font-bold transition-all appearance-none cursor-pointer"
+                  value={selectedPatientId}
+                  onChange={(e) => setSelectedPatientId(e.target.value)}
+                >
+                  <option value="" disabled>Select Target Patient</option>
+                  {MOCK_PATIENTS.map(p => (
+                    <option key={p.id} value={p.id}>{p.name} — {p.condition} ({p.risk.toUpperCase()})</option>
+                  ))}
+                </select>
+             </div>
              
              <button 
                onClick={handleStartCall}
                disabled={!selectedPatientId}
-               className="w-full py-4 bg-tertiary text-foreground font-heading font-bold rounded-full border-2 border-border shadow-pop hover:-translate-y-1 hover:shadow-pop-hover active:translate-y-0 disabled:opacity-50 disabled:pointer-events-none transition-all flex justify-center items-center gap-2"
+               className="w-full py-5 bg-tertiary text-foreground font-heading font-bold rounded-full border-4 border-foreground shadow-pop hover:-translate-y-1 hover:shadow-pop-hover active:translate-x-0.5 active:translate-y-0.5 transition-all flex justify-center items-center gap-3 text-xl disabled:opacity-50"
              >
-               <Phone className="w-5 h-5" /> Initiate AI Call
+               <MessageCircle className="w-6 h-6 fill-current" /> Start Demo Session
              </button>
            </div>
         </div>
       )}
 
-      {callState === "ringing" && (
-         <div className="bg-card border-2 border-border shadow-soft rounded-xl p-16 text-center flex flex-col items-center">
-            <div className="w-24 h-24 rounded-full bg-tertiary animate-pulse flex items-center justify-center border-2 border-border mb-6">
-               <Phone className="w-10 h-10 text-white animate-wiggle" />
-            </div>
-            <h2 className="text-3xl font-heading font-extrabold text-foreground animate-pulse">Dialing...</h2>
-            <p className="text-muted-foreground font-medium mt-2">Connecting Gemini reasoning engine...</p>
-         </div>
-      )}
-
-      {callState === "active" && (
-         <div className="grid grid-cols-1 gap-6">
-            <div className="bg-card border-2 border-border shadow-soft rounded-xl flex flex-col h-[500px]">
-               {/* Header */}
-               <div className="p-4 border-b-2 border-border border-dashed flex justify-between items-center bg-muted/20">
-                  <div className="flex items-center gap-3">
-                     <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
-                     <span className="font-bold text-foreground tracking-widest uppercase text-sm">Call In Progress</span>
-                  </div>
-                  <span className="font-extrabold text-muted-foreground">{patients.find(p=>p.id === selectedPatientId)?.name}</span>
-               </div>
-               
-               {/* Transcript Box */}
-               <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                  {transcriptLog.map((t, idx) => (
-                    <div key={idx} className={`flex w-full ${t.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                        <div className={`max-w-[75%] p-4 rounded-xl border-2 border-border shadow-[4px_4px_0_0_rgba(30,41,59,0.1)] relative ${t.role === 'user' ? 'bg-background' : 'bg-primary text-white'}`}>
-                           <p className={`text-[10px] font-bold uppercase tracking-widest mb-1 opacity-70`}>
-                             {t.role === 'user' ? 'Patient' : 'VITALS AI'}
-                           </p>
-                           <p className="text-base font-medium leading-relaxed">{t.text}</p>
-                        </div>
-                    </div>
-                  ))}
-                  
-                  {/* Live Listening Render */}
-                  {(isListening || liveTranscript) && (
-                    <div className="flex w-full justify-end">
-                       <div className="max-w-[75%] p-4 rounded-xl border-2 border-border bg-background relative flex items-center gap-3 shadow-pop">
-                           <Mic className="w-4 h-4 text-secondary animate-pulse shrink-0" />
-                           <p className="text-base font-medium leading-relaxed italic text-muted-foreground break-words w-full">
-                              {liveTranscript || "Listening..."}
-                           </p>
-                       </div>
-                    </div>
-                  )}
-
-                  {/* Thinking Render */}
-                  {processingUserTurn && (
-                    <div className="flex w-full justify-start">
-                       <div className="px-4 py-3 rounded-xl border-2 border-border bg-primary text-white relative flex gap-2 items-center">
-                           <div className="w-2 h-2 rounded-full bg-white animate-bounce" />
-                           <div className="w-2 h-2 rounded-full bg-white animate-bounce" style={{animationDelay: "0.2s"}} />
-                           <div className="w-2 h-2 rounded-full bg-white animate-bounce" style={{animationDelay: "0.4s"}} />
-                       </div>
-                    </div>
-                  )}
-                  <div ref={transcriptEndRef} />
-               </div>
-               
-               {/* Call Controls */}
-               <div className="p-4 border-t-2 border-border border-dashed flex justify-center gap-4 bg-muted/20">
-                  <button 
-                     onClick={isListening ? () => handleUserTurnEnd() : listen} 
-                     disabled={processingUserTurn}
-                     className={`px-8 py-4 rounded-full border-2 border-border font-heading font-extrabold uppercase tracking-wide transition-all shadow-pop hover:-translate-y-1 hover:shadow-pop-hover active:translate-y-0 ${isListening ? 'bg-secondary text-white' : 'bg-card text-foreground'}`}
-                  >
-                     {isListening ? "Send Voice Response" : "Hold to Talk"}
-                  </button>
-                  <button 
-                     onClick={handUpAndAnalyze}
-                     className="w-14 h-14 rounded-full bg-destructive flex items-center justify-center border-2 border-border shadow-pop hover:-translate-y-1 hover:shadow-pop-hover active:translate-y-0 text-white transition-all shrink-0"
-                  >
-                     <PhoneOff className="w-6 h-6" />
-                  </button>
-               </div>
-            </div>
-         </div>
-      )}
-
-      {callState === "analyzing" && (
-         <div className="bg-card border-2 border-border shadow-soft rounded-xl p-16 text-center flex flex-col items-center">
-            <div className="w-24 h-24 rounded-full bg-secondary flex items-center justify-center border-2 border-border mb-6">
-               <Activity className="w-10 h-10 text-white animate-spin" style={{ animationDuration: '3s' }} />
-            </div>
-            <h2 className="text-3xl font-heading font-extrabold text-foreground mb-4 tracking-tight">Post-Call Analysis</h2>
-            <p className="text-muted-foreground font-medium max-w-lg mx-auto">
-               The Gemini reasoning layer is running Pattern Recognition on the transcript. It will evaluate the risk level, summarize medical patterns, and generate automated alerts for the doctor-in-the-loop approval board.
-            </p>
-         </div>
-      )}
-
-      {callState === "completed" && summaryData && (
-         <div className="space-y-6">
-           <div className="bg-card border-2 border-border shadow-[8px_8px_0_0_rgba(52,211,153,1)] rounded-xl p-8 md:p-12 relative overflow-hidden group">
-              <div className="w-16 h-16 rounded-full bg-quaternary flex items-center justify-center text-white border-2 border-border shadow-pop mb-6">
-                <CheckCircle className="w-8 h-8" />
+      {phase === "ringing" && (
+        <div className="flex flex-col items-center space-y-8 animate-in fade-in zoom-in duration-500">
+           <div className="relative">
+              <div className="absolute inset-0 bg-primary/20 rounded-full animate-ping" />
+              <div className="relative w-40 h-40 bg-card rounded-full border-4 border-border flex items-center justify-center shadow-soft">
+                  <Phone className="w-16 h-16 text-primary" />
               </div>
-              <h2 className="text-3xl font-heading font-extrabold text-foreground mb-4">Risk Assessed & Saved</h2>
-              <p className="text-lg text-muted-foreground font-medium mb-8">
-                {summaryData.summary}
-              </p>
+           </div>
+           <div className="text-center">
+              <h2 className="text-4xl font-heading font-black uppercase italic tracking-tighter">Connecting Engine</h2>
+              <p className="text-muted-foreground font-bold mt-2 uppercase text-xs tracking-[0.3em]">Initializing Medical Graph...</p>
+           </div>
+        </div>
+      )}
+
+      {phase === "active" && (
+        <div className="w-full max-w-5xl h-[800px] bg-card/90 backdrop-blur-2xl border-4 border-border rounded-[40px] shadow-soft overflow-hidden flex flex-col relative animate-in slide-in-from-bottom-12 duration-500">
+           {/* Top Bar */}
+           <div className="p-6 border-b-4 border-border flex justify-between items-center bg-muted/30">
+              <div className="flex items-center gap-4">
+                 <div className="w-12 h-12 bg-primary rounded-xl flex items-center justify-center text-white border-2 border-border shadow-pop">
+                    <Sparkles className="w-6 h-6 animate-pulse" />
+                 </div>
+                 <div>
+                    <h3 className="font-heading font-extrabold text-xl">{MOCK_PATIENTS.find(p=>p.id === selectedPatientId)?.name}</h3>
+                    <div className="flex items-center gap-2">
+                       <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                       <span className="text-xs font-bold text-muted-foreground uppercase tracking-widest">{formatTime(duration)} — Simulated Demo</span>
+                    </div>
+                 </div>
+              </div>
               
-              <div className="grid md:grid-cols-2 gap-4 mt-6">
-                <div className="p-4 border-2 border-border rounded-lg bg-background">
-                  <span className="block text-xs font-bold uppercase tracking-widest text-muted-foreground mb-1">Diagnostic Tag</span>
-                  <span className="font-extrabold text-lg flex items-center gap-2">
-                     {summaryData.risk_level === 'high' && <AlertTriangle className="w-5 h-5 text-secondary" />}
-                     {summaryData.alert_type}
-                  </span>
+              <button 
+                onClick={handleHangUp}
+                className="px-6 py-3 bg-destructive text-white rounded-xl border-2 border-foreground shadow-pop hover:-translate-y-0.5 transition-all font-bold uppercase tracking-tighter flex items-center gap-2"
+              >
+                 <PhoneOff className="w-4 h-4" /> End Session
+              </button>
+           </div>
+
+           {/* Transcript Area */}
+           <div className="flex-1 overflow-y-auto p-8 space-y-8 scroll-smooth pb-0">
+              {transcriptLog.map((t, i) => (
+                <div key={i} className={`flex items-start gap-4 ${t.role === 'user' ? 'flex-row-reverse' : 'flex-row'} animate-in slide-in-from-bottom-4 duration-300`}>
+                   <div className={`w-10 h-10 rounded-full border-2 border-border flex items-center justify-center shadow-pop shrink-0 ${t.role === 'user' ? 'bg-secondary' : 'bg-primary'}`}>
+                      {t.role === 'user' ? <User className="w-5 h-5 text-white" /> : <Bot className="w-5 h-5 text-white" />}
+                   </div>
+                   <div className={`max-w-[70%] p-5 rounded-2xl border-2 border-border shadow-soft relative ${t.role === 'user' ? 'bg-white rounded-tr-none' : 'bg-primary/10 rounded-tl-none'}`}>
+                      <p className="text-lg font-medium leading-relaxed">{t.text}</p>
+                   </div>
                 </div>
-                <div className="p-4 border-2 border-border rounded-lg bg-background">
-                  <span className="block text-xs font-bold uppercase tracking-widest text-muted-foreground mb-1">Risk Level</span>
-                  <span className={`inline-block px-3 py-1 font-bold text-sm uppercase rounded-full border-2 border-border ${summaryData.risk_level === 'high' ? 'bg-secondary text-white' : 'bg-muted text-foreground'}`}>
-                     {summaryData.risk_level}
-                  </span>
+              ))}
+
+              {processingUserTurn && (
+                <div className="flex items-start gap-4 flex-row animate-in fade-in">
+                   <div className="w-10 h-10 rounded-full border-2 border-border bg-primary/50 flex items-center justify-center shadow-pop">
+                      <Bot className="w-5 h-5 text-white animate-spin" />
+                   </div>
+                   <div className="p-4 bg-muted rounded-2xl border-2 border-border flex gap-2">
+                      <div className="w-2 h-2 bg-primary rounded-full animate-bounce" />
+                      <div className="w-2 h-2 bg-primary rounded-full animate-bounce [animation-delay:-0.15s]" />
+                      <div className="w-2 h-2 bg-primary rounded-full animate-bounce [animation-delay:-0.3s]" />
+                   </div>
                 </div>
+              )}
+              <div key="spacer" className="h-4" />
+              <div ref={transcriptEndRef} />
+           </div>
+
+           {/* Manual Input Area */}
+           <div className="p-8 pb-10 bg-muted/20 border-t-4 border-border">
+              <form onSubmit={handleSendMessage} className="relative group max-w-4xl mx-auto flex gap-4">
+                 <input 
+                   type="text" 
+                   className="flex-1 px-8 py-5 rounded-2xl border-4 border-border bg-background shadow-soft outline-none focus:border-primary transition-all font-bold text-lg"
+                   placeholder="Try saying 'I feel dizzy' or 'Yes, I took it'..."
+                   value={chatInput}
+                   onChange={(e) => setChatInput(e.target.value)}
+                   disabled={processingUserTurn}
+                 />
+                 <button 
+                  type="submit"
+                  disabled={!chatInput.trim() || processingUserTurn}
+                  className="px-8 py-5 bg-tertiary text-foreground font-black uppercase rounded-2xl border-4 border-foreground shadow-pop hover:-translate-y-1 hover:shadow-pop-hover active:translate-y-0 disabled:opacity-50 transition-all flex items-center gap-2"
+                 >
+                    Send <Send className="w-5 h-5" />
+                 </button>
+              </form>
+           </div>
+        </div>
+      )}
+
+      {phase === "analyzing" && (
+        <div className="text-center space-y-8 animate-in zoom-in duration-500">
+           <div className="w-48 h-48 bg-primary/10 rounded-full flex items-center justify-center relative mx-auto overflow-hidden border-4 border-border">
+              <Activity className="w-20 h-20 text-primary animate-pulse" />
+              <div className="absolute inset-0 border-[6px] border-primary/20 border-t-primary rounded-full animate-spin [animation-duration:3s]" />
+           </div>
+           <div className="space-y-4">
+              <h2 className="text-5xl font-heading font-black uppercase italic tracking-tighter">Clinical Analysis</h2>
+              <p className="text-muted-foreground font-bold max-w-md mx-auto uppercase text-xs tracking-[0.4em]">
+                Extracting medical intent from demo session...
+              </p>
+           </div>
+        </div>
+      )}
+
+      {phase === "completed" && summaryData && (
+        <div className="w-full max-w-4xl space-y-8 animate-in slide-in-from-bottom-12 duration-700">
+           <div className="bg-card border-4 border-border rounded-[40px] shadow-soft overflow-hidden">
+              <div className="bg-quaternary p-8 flex justify-between items-center text-white border-b-4 border-border">
+                 <div className="flex items-center gap-4">
+                    <div className="w-14 h-14 bg-white/20 rounded-full flex items-center justify-center backdrop-blur-md">
+                       <Clipboard className="w-8 h-8" />
+                    </div>
+                    <div>
+                       <h2 className="text-3xl font-heading font-black uppercase tracking-tight text-white border-none bg-transparent m-0 leading-none">Clinical Assessment</h2>
+                       <p className="font-bold opacity-80 uppercase text-xs tracking-widest text-white border-none bg-transparent mt-2">Demo Report Generation Successful</p>
+                    </div>
+                 </div>
+                 <div className={`px-6 py-3 rounded-2xl border-2 border-white/50 backdrop-blur-md font-black italic text-xl uppercase ${summaryData.risk_level === 'high' ? 'bg-destructive ring-4 ring-destructive/30' : 'bg-primary'}`}>
+                    {summaryData.risk_level} Risk
+                 </div>
               </div>
 
-              <div className="mt-8 flex gap-4">
-                 <button onClick={() => navigate('/dashboard/alerts')} className="px-6 py-3 bg-secondary text-white font-heading font-bold rounded-full border-2 border-border shadow-pop hover:-translate-y-1 hover:shadow-[4px_4px_0_0_#1E293B]">
-                   View Alerts Dashboard
+              <div className="p-10 space-y-10">
+                 <div className="space-y-4 text-left">
+                    <h4 className="flex items-center gap-2 text-muted-foreground font-black uppercase tracking-widest text-sm border-none bg-transparent">
+                       <Activity className="w-4 h-4 text-quaternary" /> Executive Summary
+                    </h4>
+                    <p className="text-2xl font-bold leading-relaxed">{summaryData.summary}</p>
+                 </div>
+
+                 <div className="grid md:grid-cols-2 gap-8">
+                    <div className="p-6 bg-muted/40 rounded-3xl border-2 border-border space-y-4 text-left">
+                       <h4 className="flex items-center gap-2 text-muted-foreground font-black uppercase tracking-widest text-sm border-none bg-transparent">
+                          <AlertTriangle className="w-4 h-4 text-secondary" /> Diagnostic Alerts
+                       </h4>
+                       <div className="p-4 bg-white border-2 border-border rounded-2xl font-black text-xl text-secondary shadow-pop uppercase italic">
+                          {summaryData.alert_type}
+                       </div>
+                    </div>
+                    
+                    <div className="p-6 bg-muted/40 rounded-3xl border-2 border-border space-y-4 text-left">
+                       <h4 className="flex items-center gap-2 text-muted-foreground font-black uppercase tracking-widest text-sm border-none bg-transparent">
+                          <Clipboard className="w-4 h-4 text-primary" /> Observed Symptoms
+                       </h4>
+                       <div className="flex flex-wrap gap-2">
+                          {summaryData.symptoms.map((s: string, i: number) => (
+                             <span key={i} className="px-3 py-1 bg-white border-2 border-border rounded-full font-bold text-sm">
+                                {s}
+                             </span>
+                          ))}
+                       </div>
+                    </div>
+                 </div>
+
+                 <div className="p-8 bg-muted/80 rounded-3xl border-2 border-border grid grid-cols-3 gap-6">
+                    {Object.entries(summaryData.vitals_data).map(([key, val]: any) => (
+                       <div key={key} className="text-center p-3 bg-white rounded-2xl border-2 border-border shadow-soft">
+                          <p className="text-[10px] font-black uppercase text-muted-foreground mb-1 tracking-tighter">{key.replace('_',' ')}</p>
+                          <p className="text-lg font-black text-foreground">{val}</p>
+                       </div>
+                    ))}
+                 </div>
+
+                 <div className="p-8 bg-secondary/5 rounded-3xl border-4 border-dashed border-secondary/30 flex items-center justify-between text-left">
+                    <div>
+                       <h4 className="text-secondary font-black uppercase tracking-widest text-sm mb-1 border-none bg-transparent">Recommended Action</h4>
+                       <p className="text-xl font-bold">{summaryData.action_required}</p>
+                    </div>
+                    <Shield className="w-12 h-12 text-secondary opacity-20" />
+                 </div>
+              </div>
+
+              <div className="p-8 bg-muted border-t-4 border-border flex gap-4">
+                 <button 
+                  onClick={() => setPhase("idle")} 
+                  className="flex-1 py-5 bg-white text-foreground font-heading font-black uppercase rounded-2xl border-4 border-foreground shadow-pop hover:-translate-y-1 transition-all flex items-center justify-center gap-2"
+                 >
+                    Reset Demo
                  </button>
-                 <button onClick={() => setCallState("idle")} className="px-6 py-3 bg-card text-foreground font-heading font-bold rounded-full border-2 border-border shadow-pop hover:-translate-y-1 hover:bg-muted transition-all">
-                   Run Another Call
+                 <button 
+                  onClick={() => setPhase("idle")} 
+                  className="px-10 py-5 bg-tertiary text-foreground font-heading font-black uppercase rounded-2xl border-4 border-foreground shadow-pop hover:-translate-y-1 transition-all"
+                 >
+                    New Patient
                  </button>
               </div>
            </div>
-         </div>
+        </div>
       )}
     </div>
   );

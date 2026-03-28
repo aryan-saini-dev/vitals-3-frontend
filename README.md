@@ -1,3 +1,2 @@
-# Welcome to your Lovable project
+# Welcome to your VITALS project
 
-TODO: Document your project here

@@ -44,25 +44,25 @@ Current healthcare is reactive and manual, leading to three primary systemic fai
 ### 📸 Screenshots
 
 **Call Interface**
-![Call Interface](vitals-3-frontend/images/Screenshot%202026-03-28%20154000.png)
+![Call Interface](/images/Screenshot%202026-03-28%20154000.png)
 
 **Patient History Sidebar**
-![Patient History](vitals-3-frontend/images/Screenshot%202026-03-28%20181544.png)
+![Patient History](/images/Screenshot%202026-03-28%20181544.png)
 
 **Doctor Approval Dashboard**
-![Doctor Dashboard](vitals-3-frontend/images/Screenshot%202026-03-28%20181554.png)
+![Doctor Dashboard](/images/Screenshot%202026-03-28%20181554.png)
 
 **Voice Interaction View**
-![Voice Interaction](vitals-3-frontend/images/Screenshot%202026-03-28%20181600.png)
+![Voice Interaction](/images/Screenshot%202026-03-28%20181600.png)
 
 **Patient Data Analysis**
-![Data Analysis](vitals-3-frontend/images/Screenshot%202026-03-28%20182059.png)
+![Data Analysis](/images/Screenshot%202026-03-28%20182059.png)
 
 **Symptom Tracking**
-![Symptom Tracking](vitals-3-frontend/images/Screenshot%202026-03-28%20182115.png)
+![Symptom Tracking](/images/Screenshot%202026-03-28%20182115.png)
 
 **Dashboard Overview**
-![Dashboard Overview](vitals-3-frontend/images/Screenshot%202026-03-28%20182130.png)
+![Dashboard Overview](/images/Screenshot%202026-03-28%20182130.png)
 
 ---
 

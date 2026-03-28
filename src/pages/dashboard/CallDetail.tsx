@@ -43,7 +43,7 @@ export default function CallDetail() {
   const vitals = call.vitals_data || {};
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
+    <div className="space-y-6 max-w-7xl mx-auto">
       <Link to="/dashboard/calls" className="inline-flex items-center text-muted-foreground hover:text-foreground font-bold transition-colors mb-2">
         <ArrowLeft className="w-5 h-5 mr-2" /> Back to Calls
       </Link>
@@ -88,7 +88,7 @@ export default function CallDetail() {
                {Object.keys(vitals).length === 0 ? (
                  <p className="text-muted-foreground font-bold text-center py-8 border-2 border-dashed border-border rounded-lg bg-muted/20">No vitals extracted from conversation.</p>
                ) : (
-                 <div className="grid grid-cols-2 gap-4">
+                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-4">
                     {Object.entries(vitals).map(([key, value]) => {
                        // Dynamic geometric mapping
                        let Icon = Stethoscope;

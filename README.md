@@ -35,9 +35,7 @@ Current healthcare is reactive and manual, leading to three primary systemic fai
 ---
 
 ### 🔗 Links
-* **Live Demo:** [Insert Link Here]
-* **Video Demo:** [Insert Link Here]
-* **Presentation:** [Link to Team Unfazed Stellaris.pdf]
+* **Presentation:** [\[Link to Team Unfazed Stellaris.pdf\]](https://drive.google.com/drive/folders/1EpG1mrEywmS8KJaucEK_qVclAHi1gmmx?usp=sharing)
 
 ---
 

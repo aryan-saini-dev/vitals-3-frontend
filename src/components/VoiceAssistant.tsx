@@ -204,6 +204,9 @@ export function VoiceAssistant({
 
     const handleError = (e: unknown) => {
       console.error("[Vapi] error:", e);
+      const maybe = e as { type?: string; error?: unknown };
+      if (maybe?.type) console.error("[Vapi] error.type:", maybe.type);
+      if (maybe?.error) console.error("[Vapi] error.detail:", maybe.error);
       setErrorMessage("Call error. Please try again.");
       setStatus("error");
       setIsListening(false);

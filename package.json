@@ -15,7 +15,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "seed:fake-calls": "tsx scripts/backfill-fake-calls.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

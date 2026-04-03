@@ -180,6 +180,16 @@ export default function Calls() {
                     <td className="p-5">
                       <div className="font-extrabold text-foreground text-lg mb-1">{new Date(call.created_at).toLocaleDateString()}</div>
                       <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{new Date(call.created_at).toLocaleTimeString()}</div>
+                      {(() => {
+                        const t = String(call.transcript || call.vitals_data?.CallTranscript || "").trim();
+                        return t ? (
+                          <div className="text-xs font-bold text-emerald-800 mt-2 leading-snug">
+                            Transcript · {t.length.toLocaleString()} chars
+                          </div>
+                        ) : (
+                          <div className="text-xs font-bold text-amber-800 mt-2">No transcript text</div>
+                        );
+                      })()}
                       <div className="text-sm text-muted-foreground md:hidden mt-2 font-medium border-l-2 pl-2 border-quaternary">{call.patient_name}</div>
                     </td>
                     <td className="p-5 hidden sm:table-cell">

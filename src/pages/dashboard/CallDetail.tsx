@@ -4,6 +4,33 @@ import { useAuth } from "@/lib/AuthContext";
 import { apiUrl } from "@/lib/api";
 import { ArrowLeft, Phone, Activity, Heart, Wind, Stethoscope } from "lucide-react";
 
+/** Split stored transcript into display blocks (handles `user:` / `assistant:` as well as Agent:/Patient:). */
+function transcriptToDisplayBlocks(text: string): string[] {
+  const raw = (text || "").replace(/\r\n/g, "\n").trim();
+  if (!raw) return [];
+  if (raw.includes("\n\n")) {
+    return raw
+      .split(/\n\n+/)
+      .map((b) => b.trim())
+      .filter(Boolean);
+  }
+  const lines = raw.split("\n").filter(Boolean);
+  const blocks: string[] = [];
+  let cur = "";
+  const speakerRe =
+    /^(agent|patient|user|bot|assistant|customer|system|tool|ai)\s*:\s*/i;
+  for (const line of lines) {
+    if (speakerRe.test(line)) {
+      if (cur) blocks.push(cur.trim());
+      cur = line;
+    } else {
+      cur = cur ? `${cur}\n${line}` : line;
+    }
+  }
+  if (cur.trim()) blocks.push(cur.trim());
+  return blocks.length ? blocks : [raw];
+}
+
 export default function CallDetail() {
   const { id } = useParams();
   const { session, isLoading: authLoading } = useAuth();
@@ -52,6 +79,7 @@ export default function CallDetail() {
   const vitals = call.vitals_data || {};
   const report = vitals.ReportData || null;
   const doctorDecision = vitals.DoctorDecision || null;
+  const transcriptText = String(call.transcript || vitals.CallTranscript || "").trim();
   const hasAiNarrative =
     report ||
     vitals.Summary ||
@@ -81,6 +109,8 @@ export default function CallDetail() {
         "PdfGeneratedAt",
         "DoctorDecision",
         "DoctorDecisionAt",
+        "DoctorEmail",
+        "CallTranscript",
       ].includes(key)
     ) {
       return false;
@@ -185,7 +215,7 @@ export default function CallDetail() {
               ) : null}
               <p className="text-sm"><strong>Risk:</strong> {report?.risk_level || vitals.RiskLevel || "N/A"}</p>
               <p className="text-sm">
-                <strong>Symptoms:</strong>{" "}
+                <strong>Symptoms (from patient lines in transcript + AI summary):</strong>{" "}
                 {(() => {
                   const s = report?.symptoms ?? vitals.Symptoms;
                   if (Array.isArray(s) && s.length) return s.join(", ");
@@ -237,36 +267,60 @@ export default function CallDetail() {
 
          {/* Right Col: Transcript */}
          <div className="lg:col-span-2 bg-card border-2 border-border shadow-soft rounded-xl p-6 md:p-8 flex flex-col h-[600px] lg:h-[calc(100vh-12rem)]">
-            <h3 className="text-2xl font-heading font-extrabold pb-4 border-b-2 border-border border-dashed tracking-tight mb-6 shrink-0">
+            <h3 className="text-2xl font-heading font-extrabold pb-4 border-b-2 border-border border-dashed tracking-tight mb-2 shrink-0">
                Call Transcript
             </h3>
-            
+            <p className="text-xs font-bold text-muted-foreground mb-4 shrink-0">
+              {transcriptText
+                ? `${transcriptText.length.toLocaleString()} characters stored · parsed from patient vs assistant turns below`
+                : "No transcript stored for this call."}
+            </p>
+
             <div className="flex-1 overflow-y-auto space-y-6 pr-4 custom-scrollbar">
-               {call.transcript ? (
-                 call.transcript.split('\n\n').map((block: string, idx: number) => {
-                   // Extremely simple bubble parsed based on Agent/Patient lines. 
-                   const isAgent = block.toLowerCase().startsWith('agent:');
-                   const isPatient = block.toLowerCase().startsWith('patient:');
-                   
-                   const cleanText = block.replace(/^(Agent:|Patient:)\s*/i, '');
-                   
+               {transcriptText ? (
+                 transcriptToDisplayBlocks(transcriptText).map((block: string, idx: number) => {
+                   const isPatient =
+                     /^(patient|user|customer)\s*:/i.test(block) || /^user:/i.test(block);
+                   const isAgent =
+                     /^(agent|bot|assistant|ai)\s*:/i.test(block) ||
+                     /^assistant:/i.test(block) ||
+                     /^system:\s*/i.test(block);
+                   const cleanText = block.replace(
+                     /^(Agent|Patient|User|Bot|Assistant|Customer|System|Tool|Ai)\s*:\s*/i,
+                     "",
+                   );
+
                    if (!isAgent && !isPatient) {
-                     return <p key={idx} className="text-muted-foreground text-center font-bold text-sm my-4 uppercase tracking-widest">{block}</p>
+                     return (
+                       <p
+                         key={idx}
+                         className="text-muted-foreground text-center font-bold text-sm my-4 uppercase tracking-widest whitespace-pre-wrap"
+                       >
+                         {block}
+                       </p>
+                     );
                    }
 
                    return (
-                     <div key={idx} className={`flex w-full ${isPatient ? 'justify-end' : 'justify-start'}`}>
-                        <div className={`max-w-[85%] p-5 rounded-2xl border-2 border-border bg-background shadow-[4px_4px_0_0_rgba(30,41,59,0.1)] relative`}>
-                           {/* Geometric tail */}
-                           <div className={`absolute top-4 w-4 h-4 border-2 border-border bg-background rotate-45 ${isPatient ? '-right-2 border-l-0 border-b-0' : '-left-2 border-r-0 border-t-0'}`}></div>
-                           
-                           <p className={`text-xs font-bold uppercase tracking-widest mb-2 flex items-center gap-2 ${isPatient ? 'text-secondary justify-end' : 'text-accent'}`}>
-                             {isPatient ? 'Patient' : 'AI Agent'}
-                           </p>
-                           <p className="text-foreground text-lg leading-relaxed font-medium">{cleanText}</p>
-                        </div>
+                     <div key={idx} className={`flex w-full ${isPatient ? "justify-end" : "justify-start"}`}>
+                       <div
+                         className={`max-w-[85%] p-5 rounded-2xl border-2 border-border bg-background shadow-[4px_4px_0_0_rgba(30,41,59,0.1)] relative`}
+                       >
+                         <div
+                           className={`absolute top-4 w-4 h-4 border-2 border-border bg-background rotate-45 ${isPatient ? "-right-2 border-l-0 border-b-0" : "-left-2 border-r-0 border-t-0"}`}
+                         ></div>
+
+                         <p
+                           className={`text-xs font-bold uppercase tracking-widest mb-2 flex items-center gap-2 ${isPatient ? "text-secondary justify-end" : "text-accent"}`}
+                         >
+                           {isPatient ? "Patient" : "AI Agent"}
+                         </p>
+                         <p className="text-foreground text-lg leading-relaxed font-medium whitespace-pre-wrap">
+                           {cleanText}
+                         </p>
+                       </div>
                      </div>
-                   )
+                   );
                  })
                ) : (
                  <div className="h-full flex flex-col items-center justify-center text-center opacity-70">

@@ -132,7 +132,11 @@ async function authenticateRequest(accessToken: string) {
   const supabase = createClient(requireSupabaseUrl(), requireEnv("SUPABASE_SERVICE_ROLE_KEY"));
   const { data: authData, error: authErr } = await supabase.auth.getUser(accessToken);
   if (authErr || !authData?.user) return null;
-  return { userId: authData.user.id, supabase };
+  return {
+    userId: authData.user.id,
+    supabase,
+    userEmail: String(authData.user.email || ""),
+  };
 }
 
 /**
@@ -142,6 +146,7 @@ function extractVapiPersistContext(vapiBody: any): {
   patient_id: string | null;
   agent_id: string | null;
   metadataDocuuid: string | null;
+  doctor_email: string | null;
 } {
   const metadata =
     vapiBody?.metadata ||
@@ -159,7 +164,9 @@ function extractVapiPersistContext(vapiBody: any): {
         ? String(metadata.patientId).trim()
         : variableValues?.patientId != null
           ? String(variableValues.patientId).trim()
-          : null;
+          : variableValues?.patient_id != null
+            ? String(variableValues.patient_id).trim()
+            : null;
 
   const agent_id =
     metadata?.agent_id != null
@@ -173,11 +180,107 @@ function extractVapiPersistContext(vapiBody: any): {
       ? String(metadata.docuuid).trim()
       : null;
 
+  const doctor_emailRaw =
+    metadata?.doctor_email ?? metadata?.doctorEmail ?? variableValues?.doctor_email ?? "";
+  const doctor_email =
+    doctor_emailRaw != null && String(doctor_emailRaw).trim() !== ""
+      ? String(doctor_emailRaw).trim()
+      : null;
+
   return {
     patient_id: patient_id || null,
     agent_id: agent_id || null,
     metadataDocuuid,
+    doctor_email,
   };
+}
+
+/** Vapi list/get payloads occasionally nest the call under `call` or `data`. */
+function unwrapVapiCallResponse(raw: any): any {
+  if (!raw || typeof raw !== "object") return raw;
+  if (raw.call && typeof raw.call === "object") return raw.call;
+  if (raw.data && typeof raw.data === "object" && raw.data.id) return raw.data;
+  return raw;
+}
+
+function normalizeVapiMessageContent(m: any): string {
+  const c = m?.message ?? m?.content ?? m?.text;
+  if (typeof c === "string") return c.trim();
+  if (Array.isArray(c)) {
+    return c
+      .map((part: any) => {
+        if (typeof part === "string") return part;
+        if (part?.text) return String(part.text);
+        return "";
+      })
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (c && typeof c === "object" && typeof (c as any).text === "string") return String((c as any).text);
+  return "";
+}
+
+function transcriptFromMessagesArray(messages: any[]): string {
+  if (!Array.isArray(messages) || !messages.length) return "";
+  const lines: string[] = [];
+  for (const m of messages) {
+    const role = (m.role || m.type || "unknown").toString().toLowerCase();
+    const text = normalizeVapiMessageContent(m);
+    if (!text) continue;
+    lines.push(`${role}: ${text}`);
+  }
+  return lines.join("\n");
+}
+
+/** Collect transcript text from all common Vapi call shapes (phone + web). */
+function buildTranscriptFromVapiCall(body: any): string {
+  if (!body || typeof body !== "object") return "";
+  const direct = typeof body.transcript === "string" ? body.transcript.trim() : "";
+  if (direct) return direct;
+  const art = body.artifact;
+  if (art && typeof art.transcript === "string" && art.transcript.trim()) return art.transcript.trim();
+  if (art && Array.isArray(art.messages)) {
+    const t = transcriptFromMessagesArray(art.messages);
+    if (t) return t;
+  }
+  if (Array.isArray(body.messages)) {
+    const t = transcriptFromMessagesArray(body.messages);
+    if (t) return t;
+  }
+  const eoc = body.endOfCallReport || body.end_of_call_report;
+  if (eoc && typeof eoc.transcript === "string" && eoc.transcript.trim()) return eoc.transcript.trim();
+  if (eoc && Array.isArray(eoc.messages)) {
+    const t = transcriptFromMessagesArray(eoc.messages);
+    if (t) return t;
+  }
+  return "";
+}
+
+function extractVapiDurationSeconds(body: any): number {
+  if (!body || typeof body !== "object") return 0;
+  const candidates = [
+    body.durationSeconds,
+    body.duration,
+    body.artifact?.durationSeconds,
+    body.endOfCallReport?.durationSeconds,
+    body.end_of_call_report?.durationSeconds,
+  ];
+  for (const raw of candidates) {
+    if (raw == null) continue;
+    let n = typeof raw === "number" ? raw : Number(raw);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    if (n > 48 * 3600) continue;
+    if (n > 36_000) n = Math.round(n / 1000);
+    return Math.round(n);
+  }
+  const started = body.startedAt || body.started_at;
+  const ended = body.endedAt || body.ended_at;
+  if (started && ended) {
+    const a = new Date(String(started)).getTime();
+    const b = new Date(String(ended)).getTime();
+    if (Number.isFinite(a) && Number.isFinite(b) && b > a) return Math.round((b - a) / 1000);
+  }
+  return 0;
 }
 
 function wrapTextToWidth(text: string, maxChars: number): string[] {
@@ -211,6 +314,8 @@ function generateReportPdfBuffer(input: {
   durationSeconds: number;
   transcriptSnippet?: string;
   report: ReportData;
+  /** Logged-in clinician email (Supabase user) for audit trail on PDF */
+  doctorEmail?: string;
 }): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
@@ -230,6 +335,9 @@ function generateReportPdfBuffer(input: {
 
       doc.fontSize(10).text(`Generated: ${new Date().toISOString()}`);
       doc.text(`Internal record ID: ${input.callId}`);
+      if (input.doctorEmail) {
+        doc.text(`Attending clinician (account): ${input.doctorEmail}`);
+      }
       doc.text(
         `Call duration: ${Math.floor(input.durationSeconds / 60)}m ${input.durationSeconds % 60}s`,
       );
@@ -345,7 +453,7 @@ Output ONLY a JSON object with this exact shape (no markdown outside JSON):
   "differential_diagnosis": ["Optional alternative 1", "Optional alternative 2"],
   "risk_level": "high" | "medium" | "low",
   "alert_type": "Concise triage title (e.g. Hyperglycemia concern, Routine follow-up clear)",
-  "symptoms": ["Explicit symptoms or concerns from the call"],
+  "symptoms": ["Short clinical-style symptom bullets. Each MUST reflect what the PATIENT actually said in the transcript (user/patient/customer lines). Do not invent findings not spoken by the patient. If the transcript is empty, use one entry: \"No transcript text — verify recording/transcript settings in Vapi.\""],
   "vitals_data": { "optional_key": "optional_value" },
   "action_required": "What the doctor or care team should do next (specific).",
   "follow_up_plan": "Follow-up timing, monitoring, education, or escalation guidance."
@@ -372,6 +480,54 @@ function normalizeReportData(raw: any): ReportData {
   };
 }
 
+/** Pull symptom-sized snippets from patient-side lines in the saved transcript (user/patient/customer roles). */
+function extractSymptomsFromPatientLines(transcript: string): string[] {
+  const text = (transcript || "").replace(/\r\n/g, "\n").trim();
+  if (!text) return [];
+  const lines = text.split("\n");
+  const out: string[] = [];
+  const patientRe = /^(user|patient|customer)\s*:\s*(.+)$/i;
+  for (const line of lines) {
+    const m = line.match(patientRe);
+    if (!m) continue;
+    const content = m[2].trim();
+    if (content.length < 4) continue;
+    if (/^(ok|yeah|yes|no|thanks|thank you|uh[\s-]?huh)\.?$/i.test(content)) continue;
+    const clipped = content.length > 280 ? `${content.slice(0, 277)}…` : content;
+    out.push(clipped);
+  }
+  return [...new Set(out.map((s) => s.trim()))].filter(Boolean).slice(0, 15);
+}
+
+/** Prefer AI-extracted symptom labels, then add anything clearly stated by the patient that is not already covered. */
+function mergeSymptomsFromTranscript(aiSymptoms: string[], transcript: string): string[] {
+  const fromPatient = extractSymptomsFromPatientLines(transcript);
+  const merged: string[] = aiSymptoms.map((s) => s.trim()).filter(Boolean);
+  if (!fromPatient.length) return merged.length ? merged : [];
+
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  for (const lineSym of fromPatient) {
+    const ln = norm(lineSym);
+    const dup = merged.some((m) => {
+      const mn = norm(m);
+      return mn.includes(ln) || ln.includes(mn) || mn.slice(0, 40) === ln.slice(0, 40);
+    });
+    if (!dup) merged.push(lineSym);
+  }
+  const out = merged.slice(0, 20);
+  const onlyGeneric =
+    out.length === 1 &&
+    /no acute|no transcript|routine check-in|verify recording/i.test(out[0] || "");
+  if (onlyGeneric && fromPatient.length) return fromPatient.slice(0, 15);
+  return out;
+}
+
+function effectiveCallTranscript(call: { transcript?: string | null; vitals_data?: any }): string {
+  const col = call.transcript != null ? String(call.transcript).trim() : "";
+  if (col) return col;
+  return String(call.vitals_data?.CallTranscript || "").trim();
+}
+
 async function persistCallAndAlertAfterAnalysis(input: {
   supabase: any;
   docuuid: string;
@@ -382,12 +538,29 @@ async function persistCallAndAlertAfterAnalysis(input: {
   summaryRaw: any;
   vapiCallId: string;
   patientRow: any | null;
+  doctor_email?: string | null;
 }) {
-  const { supabase, docuuid, patient_id, agent_id, duration_seconds, transcript, summaryRaw, vapiCallId, patientRow } =
-    input;
+  const {
+    supabase,
+    docuuid,
+    patient_id,
+    agent_id,
+    duration_seconds,
+    transcript,
+    summaryRaw,
+    vapiCallId,
+    patientRow,
+    doctor_email,
+  } = input;
 
   const summary = normalizeReportData(summaryRaw);
-  const reportData: ReportData = summary;
+  const transcriptNorm = String(transcript || "").trim();
+  const reportData: ReportData = {
+    ...summary,
+    symptoms: mergeSymptomsFromTranscript(summary.symptoms, transcriptNorm),
+  };
+
+  const doctorEmailNorm = String(doctor_email || "").trim();
 
   const vitals_data: Record<string, any> = {
     ...(reportData.vitals_data || {}),
@@ -405,7 +578,16 @@ async function persistCallAndAlertAfterAnalysis(input: {
     PatientAge: patientRow?.age != null ? String(patientRow.age) : "",
     VapiCallId: vapiCallId,
     PdfGeneratedAt: new Date().toISOString(),
+    CallTranscript: transcriptNorm,
+    ...(doctorEmailNorm ? { DoctorEmail: doctorEmailNorm } : {}),
   };
+
+  console.log(
+    "[CallPersist] transcript chars:",
+    transcriptNorm.length,
+    "symptom items:",
+    reportData.symptoms.length,
+  );
 
   try {
     const pdfBuffer = await generateReportPdfBuffer({
@@ -414,8 +596,9 @@ async function persistCallAndAlertAfterAnalysis(input: {
       patientCondition: String(patientRow?.condition || vitals_data.PatientCondition || "N/A"),
       patientAge: patientRow?.age != null ? String(patientRow.age) : vitals_data.PatientAge,
       durationSeconds: duration_seconds,
-      transcriptSnippet: String(transcript || ""),
+      transcriptSnippet: transcriptNorm,
       report: reportData,
+      doctorEmail: doctorEmailNorm || undefined,
     });
     const uploadPath = `doctor-reports/${docuuid}/${patient_id}/${vapiCallId}-${Date.now()}.pdf`;
     const { error: uploadErr } = await supabase.storage
@@ -443,7 +626,7 @@ async function persistCallAndAlertAfterAnalysis(input: {
       patient_id,
       agent_id: agent_id ? String(agent_id) : null,
       duration_seconds,
-      transcript: String(transcript || ""),
+      transcript: transcriptNorm,
       vitals_data,
     })
     .select("id")
@@ -501,12 +684,15 @@ app.get("/api/vapi/call/:callId", async (req, res) => {
       });
     }
 
-    const call = body || {};
+    const call = unwrapVapiCallResponse(body) || {};
+    const transcript = buildTranscriptFromVapiCall(call);
+    const durationSeconds = extractVapiDurationSeconds(call);
     return res.json({
       id: call.id,
       status: call.status,
       endedReason: call.endedReason || null,
-      transcript: call.transcript || "",
+      transcript,
+      durationSeconds,
       messages: Array.isArray(call.messages) ? call.messages : [],
       customer: call.customer || null,
       startedAt: call.startedAt || null,
@@ -531,7 +717,7 @@ app.post("/api/vapi/outbound-call", async (req, res) => {
 
     const authCtx = await authenticateRequest(accessToken);
     if (!authCtx) return res.status(401).json({ error: "Invalid token" });
-    const { userId, supabase } = authCtx;
+    const { userId, supabase, userEmail } = authCtx;
 
     const { patientId, destinationNumber, callerNumber } = req.body || {};
     if (!patientId || !destinationNumber) {
@@ -576,6 +762,7 @@ app.post("/api/vapi/outbound-call", async (req, res) => {
         docuuid: userId,
         patient_id: String(patient.id),
         agent_id: patient.assigned_agent_id ? String(patient.assigned_agent_id) : null,
+        doctor_email: userEmail || "",
       },
     } as any)) as any;
 
@@ -638,9 +825,14 @@ app.post("/api/vapi/sync-call", async (req, res) => {
     if (!accessToken) return res.status(401).json({ error: "Missing Authorization Bearer token" });
     const authCtx = await authenticateRequest(accessToken);
     if (!authCtx) return res.status(401).json({ error: "Invalid token" });
-    const { userId, supabase } = authCtx;
+    const { userId, supabase, userEmail } = authCtx;
+    const bodyIn = (req.body || {}) as {
+      vapiCallId?: string;
+      transcript?: string;
+      durationSeconds?: number;
+    };
 
-    const vapiCallId = String((req.body || {}).vapiCallId || "").trim();
+    const vapiCallId = String(bodyIn.vapiCallId || "").trim();
     if (!vapiCallId) return res.status(400).json({ error: "vapiCallId is required" });
 
     const { data: existing } = await supabase
@@ -658,33 +850,39 @@ app.post("/api/vapi/sync-call", async (req, res) => {
     const vapiResp = await fetch(`https://api.vapi.ai/call/${vapiCallId}`, {
       headers: { Authorization: `Bearer ${vapiApiKey}` },
     });
-    const vapiBody = await vapiResp.json().catch(() => ({}));
+    const rawVapi = await vapiResp.json().catch(() => ({}));
     if (!vapiResp.ok) {
+      console.error("[SyncCall] Vapi GET failed:", vapiResp.status, rawVapi);
       return res.status(vapiResp.status).json({
-        error: vapiBody?.message || "Could not fetch call from Vapi",
+        error: rawVapi?.message || `Could not fetch call from Vapi (${vapiResp.status})`,
+        provider: rawVapi,
       });
     }
 
+    const vapiBody = unwrapVapiCallResponse(rawVapi);
     const ctx = extractVapiPersistContext(vapiBody);
     if (!ctx.patient_id) {
       return res.status(400).json({
         error:
-          "Could not determine patient for this call. Vapi did not return patient metadata (patient_id / patientId / variableValues.patientId).",
+          "Could not determine patient for this call. Vapi did not return patient metadata (patient_id / patientId / variableValues.patientId). Ensure outbound calls set metadata (this app sets it in /api/vapi/outbound-call).",
       });
     }
     if (ctx.metadataDocuuid && ctx.metadataDocuuid !== userId) {
       return res.status(403).json({ error: "Call metadata does not belong to this account" });
     }
 
-    const transcript =
-      vapiBody?.transcript ||
-      vapiBody?.messages
-        ?.filter((m: any) => m.role === "bot" || m.role === "user" || m.role === "assistant")
-        ?.map((m: any) => `${m.role}: ${m.message || m.content || ""}`)
-        .join("\n") ||
-      "";
-    const durationRaw = vapiBody?.durationSeconds ?? vapiBody?.duration ?? 0;
-    const duration_seconds = typeof durationRaw === "number" ? durationRaw : Number(durationRaw) || 0;
+    let transcript = buildTranscriptFromVapiCall(vapiBody);
+    const clientTranscript = String(bodyIn.transcript || "").trim();
+    if (!transcript.trim() && clientTranscript) transcript = clientTranscript;
+    else if (clientTranscript.length > transcript.length + 20) transcript = clientTranscript;
+
+    let duration_seconds = extractVapiDurationSeconds(vapiBody);
+    const clientDur = Number(bodyIn.durationSeconds);
+    if ((!duration_seconds || duration_seconds < 1) && Number.isFinite(clientDur) && clientDur > 0) {
+      duration_seconds = Math.min(Math.round(clientDur), 24 * 3600);
+    }
+
+    const doctorEmail = (ctx.doctor_email?.trim() || userEmail || "").trim();
 
     const { data: patientRow } = await supabase
       .from("patients")
@@ -724,6 +922,7 @@ app.post("/api/vapi/sync-call", async (req, res) => {
       summaryRaw,
       vapiCallId,
       patientRow,
+      doctor_email: doctorEmail || null,
     });
 
     if (!result.ok) return res.status(500).json({ error: result.error });
@@ -876,7 +1075,7 @@ app.get("/api/calls/:callId/report/download", async (req, res) => {
     if (!accessToken) return res.status(401).json({ error: "Missing Authorization Bearer token" });
     const authCtx = await authenticateRequest(accessToken);
     if (!authCtx) return res.status(401).json({ error: "Invalid token" });
-    const { userId, supabase } = authCtx;
+    const { userId, supabase, userEmail } = authCtx;
 
     const { data: call, error } = await supabase
       .from("calls")
@@ -892,14 +1091,16 @@ app.get("/api/calls/:callId/report/download", async (req, res) => {
     const patientName = String(call.vitals_data?.PatientName || "Unknown");
     const patientCondition = String(call.vitals_data?.PatientCondition || "N/A");
     const patientAge = String(call.vitals_data?.PatientAge || "");
+    const doctorOnFile = String(call.vitals_data?.DoctorEmail || "").trim();
     const pdf = await generateReportPdfBuffer({
       callId: String(call.id),
       patientName,
       patientCondition,
       patientAge,
       durationSeconds: Number(call.duration_seconds || 0),
-      transcriptSnippet: String(call.transcript || ""),
+      transcriptSnippet: effectiveCallTranscript(call),
       report,
+      doctorEmail: doctorOnFile || userEmail || undefined,
     });
 
     res.setHeader("Content-Type", "application/pdf");
@@ -932,6 +1133,8 @@ app.get("/api/calls/:callId/detail", async (req, res) => {
 
     if (error || !call) return res.status(404).json({ error: "Call not found" });
 
+    const transcriptResolved = effectiveCallTranscript(call);
+
     const [patRes, agRes] = await Promise.all([
       call.patient_id
         ? supabase.from("patients").select("name").eq("id", call.patient_id).eq("docuuid", userId).maybeSingle()
@@ -944,6 +1147,7 @@ app.get("/api/calls/:callId/detail", async (req, res) => {
     return res.json({
       call: {
         ...call,
+        transcript: transcriptResolved,
         patient_name: patRes.data?.name || "Unknown",
         agent_name: agRes.data?.name || "Unknown",
       },
@@ -1092,6 +1296,13 @@ app.post("/api/vapi/webhook", async (req, res) => {
         : {},
     );
 
+    const doctor_email =
+      metadata?.doctor_email != null && String(metadata.doctor_email).trim() !== ""
+        ? String(metadata.doctor_email).trim()
+        : metadata?.doctorEmail != null && String(metadata.doctorEmail).trim() !== ""
+          ? String(metadata.doctorEmail).trim()
+          : null;
+
     const summaryRaw = await generateDoctorSummaryServer(String(transcript || ""), chartJson);
     await persistCallAndAlertAfterAnalysis({
       supabase,
@@ -1103,6 +1314,7 @@ app.post("/api/vapi/webhook", async (req, res) => {
       summaryRaw,
       vapiCallId: vapiCallId || `unknown-${Date.now()}`,
       patientRow,
+      doctor_email,
     });
 
     console.log("[Webhook] processed call for patient:", patient_id);

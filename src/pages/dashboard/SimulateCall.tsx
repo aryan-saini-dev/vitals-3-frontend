@@ -34,17 +34,35 @@ export default function SimulateCall() {
   const lastEndedReasonRef = useRef<string | null>(null);
   const summaryDoneRef = useRef(false);
   const pollCountRef = useRef(0);
+  /** Live transcript/duration fallback when Vapi GET omits fields (sync sends these to the API). */
+  const transcriptRef = useRef("");
+  const callStartedAtRef = useRef<number | null>(null);
 
-  async function syncCallToDatabase(vapiId: string | null): Promise<string | null> {
+  function clientElapsedSeconds(): number | undefined {
+    const t0 = callStartedAtRef.current;
+    if (t0 == null) return undefined;
+    return Math.max(0, Math.round((Date.now() - t0) / 1000));
+  }
+
+  async function syncCallToDatabase(
+    vapiId: string | null,
+    opts?: { transcript?: string; durationSeconds?: number },
+  ): Promise<string | null> {
     if (!session || !vapiId) return null;
     try {
+      const transcript = String(opts?.transcript ?? transcriptRef.current ?? "").trim();
+      const durationSeconds = opts?.durationSeconds ?? clientElapsedSeconds();
+      const body: Record<string, unknown> = { vapiCallId: vapiId };
+      if (transcript) body.transcript = transcript;
+      if (durationSeconds != null && durationSeconds > 0) body.durationSeconds = durationSeconds;
+
       const resp = await fetch(apiUrl("/api/vapi/sync-call"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${session.access_token}`,
         },
-        body: JSON.stringify({ vapiCallId: vapiId }),
+        body: JSON.stringify(body),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
@@ -156,6 +174,8 @@ export default function SimulateCall() {
             "PdfGeneratedAt",
             "DoctorDecision",
             "DoctorDecisionAt",
+            "DoctorEmail",
+            "CallTranscript",
           ].includes(k),
       ),
     );
@@ -196,6 +216,8 @@ export default function SimulateCall() {
     summaryDoneRef.current = false;
     pollCountRef.current = 0;
     setRecentDbCallId(null);
+    transcriptRef.current = "";
+    callStartedAtRef.current = null;
     pushDebug("Starting outbound call request");
 
     let createdCallId: string | null = null;
@@ -217,6 +239,7 @@ export default function SimulateCall() {
       createdCallId = data.vapiCallId || null;
       setVapiCallId(createdCallId);
       setRecentCallId(createdCallId);
+      callStartedAtRef.current = Date.now();
       console.log("[UI] vapiCallId:", data.vapiCallId);
       pushDebug(`Outbound call created: ${data.vapiCallId || "unknown id"}`);
     } catch (e) {
@@ -239,8 +262,35 @@ export default function SimulateCall() {
           return;
         }
         setCallStatus(String(data?.status || "unknown"));
-        if (typeof data?.transcript === "string") {
-          setLiveTranscript(data.transcript);
+
+        let nextTranscript = "";
+        if (typeof data?.transcript === "string" && data.transcript.trim()) {
+          nextTranscript = data.transcript.trim();
+        } else if (Array.isArray(data?.messages) && data.messages.length > 0) {
+          nextTranscript = data.messages
+            .map((m: { role?: string; type?: string; content?: unknown; message?: unknown }) => {
+              const role = (m.role || m.type || "unknown").toString().toLowerCase();
+              const c = m.content ?? m.message;
+              let text = "";
+              if (typeof c === "string") text = c.trim();
+              else if (Array.isArray(c))
+                text = c
+                  .map((p: unknown) =>
+                    typeof p === "string" ? p : (p as { text?: string })?.text || "",
+                  )
+                  .join(" ")
+                  .trim();
+              else if (c && typeof c === "object" && c !== null && "text" in (c as object))
+                text = String((c as { text?: string }).text || "").trim();
+              if (!text) return "";
+              return `${role}: ${text}`;
+            })
+            .filter(Boolean)
+            .join("\n");
+        }
+        if (nextTranscript) {
+          setLiveTranscript(nextTranscript);
+          transcriptRef.current = nextTranscript;
         }
         const endedReason = data?.endedReason ? String(data.endedReason) : null;
         if (endedReason && endedReason !== lastEndedReasonRef.current) {
@@ -248,7 +298,10 @@ export default function SimulateCall() {
           pushDebug(`Call ended reason: ${endedReason}`);
         }
         if (data?.status === "ended") {
-          void syncCallToDatabase(createdCallId);
+          void syncCallToDatabase(createdCallId, {
+            transcript: transcriptRef.current,
+            durationSeconds: clientElapsedSeconds(),
+          });
           setIsSaving(false);
           setErrorMessage(endedReason ? `Call ended: ${endedReason}` : "Call ended.");
           if (statusPollRef.current) {
@@ -320,7 +373,10 @@ export default function SimulateCall() {
       summaryDoneRef.current = false;
       pollCountRef.current = 0;
       const hangupT0 = Date.now();
-      await syncCallToDatabase(vapiCallId);
+      await syncCallToDatabase(vapiCallId, {
+        transcript: transcriptRef.current,
+        durationSeconds: clientElapsedSeconds(),
+      });
       if (statusPollRef.current) {
         window.clearInterval(statusPollRef.current);
         statusPollRef.current = null;

@@ -3,10 +3,12 @@ import { useAuth } from "@/lib/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { Activity, AlertTriangle, Clipboard, Phone, Shield, User } from "lucide-react";
 import type { PatientInfo } from "@/components/VoiceAssistant";
+import { useNavigate } from "react-router-dom";
 
 type CallPhase = "idle" | "dialing" | "completed";
 
 export default function SimulateCall() {
+  const navigate = useNavigate();
   const { user, session } = useAuth();
   const [patients, setPatients] = useState<PatientInfo[]>([]);
   const [selectedPatientId, setSelectedPatientId] = useState("");
@@ -20,9 +22,37 @@ export default function SimulateCall() {
   const [liveTranscript, setLiveTranscript] = useState("");
   const [callStatus, setCallStatus] = useState<string>("idle");
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
+  const [showPostCallPopup, setShowPostCallPopup] = useState(false);
+  const [recentCallId, setRecentCallId] = useState<string | null>(null);
   const pollTimerRef = useRef<number | null>(null);
   const statusPollRef = useRef<number | null>(null);
   const lastEndedReasonRef = useRef<string | null>(null);
+  const syncAttemptedRef = useRef<string | null>(null);
+
+  async function syncCallToDatabase(vapiId: string | null) {
+    if (!session || !vapiId) return;
+    if (syncAttemptedRef.current === vapiId) return;
+    syncAttemptedRef.current = vapiId;
+    try {
+      const resp = await fetch("http://localhost:4000/api/vapi/sync-call", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ vapiCallId: vapiId }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        pushDebug(`Sync to DB failed: ${data?.error || resp.status}`);
+        return;
+      }
+      if (data.duplicated) pushDebug("Sync: call already in database (webhook or prior sync).");
+      else pushDebug(`Sync: stored call in database id ${data.callId || "ok"}`);
+    } catch (e) {
+      pushDebug(`Sync error: ${e instanceof Error ? e.message : "unknown"}`);
+    }
+  }
 
   function pushDebug(line: string) {
     const stamp = new Date().toLocaleTimeString();
@@ -93,7 +123,31 @@ export default function SimulateCall() {
 
     const vitals = (call.vitals_data || {}) as Record<string, any>;
     const vitalsOnly = Object.fromEntries(
-      Object.entries(vitals).filter(([k]) => !["Symptoms", "Summary", "ActionRequired"].includes(k)),
+      Object.entries(vitals).filter(
+        ([k]) =>
+          ![
+            "Symptoms",
+            "Summary",
+            "Diagnosis",
+            "ActionRequired",
+            "RelevantHistory",
+            "ClinicalReasoning",
+            "DifferentialDiagnosis",
+            "FollowUpPlan",
+            "ReportData",
+            "PatientName",
+            "PatientCondition",
+            "PatientAge",
+            "VapiCallId",
+            "ReportPdfPath",
+            "PdfStoredInStorage",
+            "PdfStorageError",
+            "PdfGenerationError",
+            "PdfGeneratedAt",
+            "DoctorDecision",
+            "DoctorDecisionAt",
+          ].includes(k),
+      ),
     );
     return {
       summary: vitals.Summary || "",
@@ -116,6 +170,7 @@ export default function SimulateCall() {
     setCallStatus("dialing");
     setDebugLogs([]);
     lastEndedReasonRef.current = null;
+    syncAttemptedRef.current = null;
     pushDebug("Starting outbound call request");
 
     let createdCallId: string | null = null;
@@ -136,6 +191,7 @@ export default function SimulateCall() {
       if (!resp.ok) throw new Error(data?.error || "Outbound call start failed");
       createdCallId = data.vapiCallId || null;
       setVapiCallId(createdCallId);
+      setRecentCallId(createdCallId);
       console.log("[UI] vapiCallId:", data.vapiCallId);
       pushDebug(`Outbound call created: ${data.vapiCallId || "unknown id"}`);
     } catch (e) {
@@ -167,6 +223,7 @@ export default function SimulateCall() {
           pushDebug(`Call ended reason: ${endedReason}`);
         }
         if (data?.status === "ended") {
+          void syncCallToDatabase(createdCallId);
           setIsSaving(false);
           if (!summaryData) {
             setErrorMessage(endedReason ? `Call ended: ${endedReason}` : "Call ended.");
@@ -221,6 +278,7 @@ export default function SimulateCall() {
         return;
       }
       pushDebug("Hangup succeeded");
+      void syncCallToDatabase(vapiCallId);
       if (statusPollRef.current) {
         window.clearInterval(statusPollRef.current);
         statusPollRef.current = null;
@@ -232,6 +290,7 @@ export default function SimulateCall() {
       setCallStatus("ended");
       setIsSaving(false);
       setPhase("idle");
+      setShowPostCallPopup(true);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Hangup failed";
       setErrorMessage(msg);
@@ -337,6 +396,41 @@ export default function SimulateCall() {
               Free Vapi numbers usually dial US numbers only. Use +1 or upgrade your Vapi number plan.
             </p>
           )}
+        </div>
+      )}
+
+      {showPostCallPopup && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-card border-2 border-border rounded-2xl p-6 shadow-soft space-y-4">
+            <h3 className="text-2xl font-heading font-extrabold">Call Ended</h3>
+            <p className="text-sm text-muted-foreground font-medium">
+              Open Alerts to review call details, approve/deny doctor decision, and download prescription-style PDF report.
+            </p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPostCallPopup(false);
+                  navigate("/dashboard/alerts", {
+                    state: {
+                      focusPatientId: selectedPatientId,
+                      focusCallId: recentCallId,
+                    },
+                  });
+                }}
+                className="px-4 py-3 rounded-xl border-2 border-foreground bg-quaternary text-white font-bold"
+              >
+                View Details
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowPostCallPopup(false)}
+                className="px-4 py-3 rounded-xl border-2 border-foreground bg-white font-bold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

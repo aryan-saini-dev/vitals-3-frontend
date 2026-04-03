@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/AuthContext";
 import { Bell, CheckCircle2 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 
 export default function Alerts() {
-  const { user } = useAuth();
+  const { user, session } = useAuth();
+  const location = useLocation();
   const [alerts, setAlerts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -17,10 +18,11 @@ export default function Alerts() {
   async function fetchAlerts() {
     if (!user) return;
     try {
-      const [alertsRes, patsRes, agentsRes] = await Promise.all([
+      const [alertsRes, patsRes, agentsRes, callsRes] = await Promise.all([
         supabase.from("alerts").select("*").eq("docuuid", user.id).order("created_at", { ascending: false }),
         supabase.from("patients").select("*").eq("docuuid", user.id),
-        supabase.from("agents").select("*").eq("docuuid", user.id)
+        supabase.from("agents").select("*").eq("docuuid", user.id),
+        supabase.from("calls").select("*").eq("docuuid", user.id).order("created_at", { ascending: false }),
       ]);
       
       if (alertsRes.error) {
@@ -32,7 +34,13 @@ export default function Alerts() {
         const merged = alertsRes.data.map(alert => {
            const pat = patsRes.data?.find(p => p.id === alert.patient_id);
            const ag = agentsRes.data?.find(a => a.id === alert.agent_id);
-           return { ...alert, patient_name: pat?.name || "Unknown", agent_name: ag?.name || "Unknown" };
+           const callForAlert = callsRes.data?.find((c) => c.patient_id === alert.patient_id);
+           return {
+             ...alert,
+             patient_name: pat?.name || "Unknown",
+             agent_name: ag?.name || "Unknown",
+             call: callForAlert || null,
+           };
         });
         setAlerts(merged);
       }
@@ -54,6 +62,48 @@ export default function Alerts() {
     } else {
        toast.error("Failed to resolve alert");
     }
+  };
+
+  const setDecision = async (callId: string, decision: "approved" | "denied", e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!session) return;
+    const resp = await fetch(`http://localhost:4000/api/calls/${callId}/decision`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ decision }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      toast.error(data?.error || "Decision update failed");
+      return;
+    }
+    toast.success(`Report ${decision}.`);
+    fetchAlerts();
+  };
+
+  const downloadReport = async (callId: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!session) return;
+    const resp = await fetch(`http://localhost:4000/api/calls/${callId}/report/download`, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      toast.error(data?.error || "Download failed");
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `doctor-prescription-report-${callId}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -78,13 +128,22 @@ export default function Alerts() {
       ) : (
         <div className="space-y-5">
           {alerts.map((alert) => {
+             const isFocusedFromCallFlow =
+               (location.state as any)?.focusPatientId &&
+               (location.state as any)?.focusPatientId === alert.patient_id;
              const isOpen = alert.status === 'open';
              const isHigh = alert.severity === 'high';
              const isValidHigh = isHigh && isOpen;
+             const isApproved = alert.status === "approved";
+             const isDenied = alert.status === "denied";
              
              // Playful geometric specific active states
              const highlightColor = isValidHigh 
                ? 'bg-secondary text-white border-2 border-border shadow-[4px_4px_0_0_#1E293B] -translate-y-1' 
+               : isApproved
+                 ? 'bg-emerald-50 text-foreground border-2 border-border shadow-soft'
+                 : isDenied
+                   ? 'bg-rose-50 text-foreground border-2 border-border shadow-soft'
                : isOpen 
                  ? 'bg-card text-foreground border-2 border-border shadow-soft'
                  : 'bg-muted/30 text-muted-foreground border-2 border-dashed border-border opacity-70';
@@ -92,7 +151,10 @@ export default function Alerts() {
              const pillColor = isValidHigh ? 'bg-white text-secondary' : 'bg-background text-foreground border-2 border-border';
 
              return (
-              <div key={alert.id} className={`p-6 rounded-xl transition-all duration-300 relative overflow-hidden group ${highlightColor}`}>
+              <div
+                key={alert.id}
+                className={`p-6 rounded-xl transition-all duration-300 relative overflow-hidden group ${highlightColor} ${isFocusedFromCallFlow ? "ring-4 ring-primary/50" : ""}`}
+              >
                 
                 {isValidHigh && <div className="absolute top-0 right-0 w-32 h-32 bg-white opacity-10 rounded-full blur-xl pointer-events-none translate-x-1/2 -translate-y-1/2"></div>}
                 
@@ -113,19 +175,59 @@ export default function Alerts() {
                       </Link> 
                       &nbsp;&bull;&nbsp; Agent: {alert.agent_name}
                     </p>
+                    {alert.call && (
+                      <div className="mt-3 space-y-1">
+                        <p className={`text-xs font-semibold ${isValidHigh ? 'text-white/90' : 'text-muted-foreground'}`}>
+                          Summary: {alert.call.vitals_data?.Summary || "N/A"}
+                        </p>
+                        <p className={`text-xs font-semibold ${isValidHigh ? 'text-white/90' : 'text-muted-foreground'}`}>
+                          Diagnosis: {alert.call.vitals_data?.Diagnosis || "N/A"}
+                        </p>
+                      </div>
+                    )}
                   </div>
                   
                   <div className="shrink-0 flex items-center justify-end w-full md:w-auto">
                      {isOpen ? (
+                       <div className="flex flex-wrap justify-end gap-2">
+                        {alert.call && (
+                          <>
+                            <button
+                              onClick={(e) => setDecision(alert.call.id, "approved", e)}
+                              className="inline-flex items-center justify-center gap-2 h-11 px-4 font-bold text-sm rounded-xl border-2 border-border bg-emerald-100"
+                            >
+                              Approve
+                            </button>
+                            <button
+                              onClick={(e) => setDecision(alert.call.id, "denied", e)}
+                              className="inline-flex items-center justify-center gap-2 h-11 px-4 font-bold text-sm rounded-xl border-2 border-border bg-rose-100"
+                            >
+                              Deny
+                            </button>
+                            <button
+                              onClick={(e) => downloadReport(alert.call.id, e)}
+                              className="inline-flex items-center justify-center gap-2 h-11 px-4 font-bold text-sm rounded-xl border-2 border-border bg-background"
+                            >
+                              Download PDF
+                            </button>
+                            <Link
+                              to={`/dashboard/calls/${alert.call.id}`}
+                              className="inline-flex items-center justify-center gap-2 h-11 px-4 font-bold text-sm rounded-xl border-2 border-border bg-quaternary text-white"
+                            >
+                              View Details
+                            </Link>
+                          </>
+                        )}
                         <button 
                           onClick={(e) => markResolved(alert.id, e)}
-                          className={`inline-flex items-center justify-center gap-3 h-14 px-8 font-heading font-extrabold text-lg uppercase tracking-wide rounded-full border-2 transition-all shadow-[4px_4px_0_0_#1E293B] hover:-translate-y-1 active:translate-y-0 active:shadow-[2px_2px_0_0_#1E293B] ${isValidHigh ? 'bg-white text-secondary border-transparent hover:bg-muted' : 'bg-background text-foreground border-border hover:bg-muted font-bold'}`}
+                          className={`inline-flex items-center justify-center gap-3 h-11 px-4 font-heading font-extrabold text-sm uppercase tracking-wide rounded-xl border-2 transition-all shadow-[4px_4px_0_0_#1E293B] hover:-translate-y-1 active:translate-y-0 active:shadow-[2px_2px_0_0_#1E293B] ${isValidHigh ? 'bg-white text-secondary border-transparent hover:bg-muted' : 'bg-background text-foreground border-border hover:bg-muted font-bold'}`}
                         >
-                          <CheckCircle2 className="w-6 h-6" strokeWidth={2.5}/> Resolve
+                          <CheckCircle2 className="w-5 h-5" strokeWidth={2.5}/> Resolve
                         </button>
+                       </div>
                      ) : (
                         <span className="inline-flex items-center gap-2 px-6 py-3 bg-background border-2 border-border rounded-full text-sm font-bold uppercase text-muted-foreground tracking-widest">
-                          <CheckCircle2 className="w-5 h-5" /> Resolved
+                          <CheckCircle2 className="w-5 h-5" /> {isApproved ? "Approved" : isDenied ? "Denied" : "Resolved"}
                         </span>
                      )}
                   </div>

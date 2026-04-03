@@ -21,6 +21,7 @@ import Alerts from "./pages/dashboard/Alerts.tsx";
 import Calls from "./pages/dashboard/Calls.tsx";
 import CallDetail from "./pages/dashboard/CallDetail.tsx";
 import SimulateCall from "./pages/dashboard/SimulateCall.tsx";
+import MisdiagnosisSolution from "./pages/dashboard/MisdiagnosisSolution.tsx";
 
 const queryClient = new QueryClient();
 
@@ -72,6 +73,7 @@ const App = () => (
               <Route path="calls" element={<Calls />} />
               <Route path="calls/simulate" element={<SimulateCall />} />
               <Route path="calls/:id" element={<CallDetail />} />
+              <Route path="misdiagnosis-solution" element={<MisdiagnosisSolution />} />
             </Route>
 
             {/* Catch-all */}

@@ -6,7 +6,7 @@ import { ArrowLeft, Phone, Activity, Heart, Wind, Stethoscope } from "lucide-rea
 
 export default function CallDetail() {
   const { id } = useParams();
-  const { user } = useAuth();
+  const { user, session } = useAuth();
   const [call, setCall] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
@@ -41,6 +41,74 @@ export default function CallDetail() {
   if (!call) return <div className="p-8 text-center text-muted-foreground font-bold">Call record not found.</div>;
 
   const vitals = call.vitals_data || {};
+  const report = vitals.ReportData || null;
+  const doctorDecision = vitals.DoctorDecision || null;
+
+  const vitalsDisplayEntries = Object.entries(vitals).filter(([key, value]) => {
+    if (
+      [
+        "ReportData",
+        "Symptoms",
+        "Summary",
+        "Diagnosis",
+        "RelevantHistory",
+        "ClinicalReasoning",
+        "DifferentialDiagnosis",
+        "FollowUpPlan",
+        "ActionRequired",
+        "PatientName",
+        "PatientCondition",
+        "PatientAge",
+        "VapiCallId",
+        "ReportPdfPath",
+        "PdfStoredInStorage",
+        "PdfStorageError",
+        "PdfGenerationError",
+        "PdfGeneratedAt",
+        "DoctorDecision",
+        "DoctorDecisionAt",
+      ].includes(key)
+    ) {
+      return false;
+    }
+    if (value !== null && typeof value === "object") return false;
+    return true;
+  });
+
+  async function downloadReport() {
+    if (!session || !id) return;
+    const resp = await fetch(`http://localhost:4000/api/calls/${id}/report/download`, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `doctor-report-${id}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function setDecision(decision: "approved" | "denied") {
+    if (!session || !id) return;
+    const resp = await fetch(`http://localhost:4000/api/calls/${id}/decision`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ decision }),
+    });
+    if (!resp.ok) return;
+    setCall((prev: any) => ({
+      ...prev,
+      vitals_data: {
+        ...(prev.vitals_data || {}),
+        DoctorDecision: decision,
+      },
+    }));
+  }
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -73,8 +141,43 @@ export default function CallDetail() {
                     <span className="text-muted-foreground font-bold">Duration</span>
                     <span className="font-extrabold bg-muted px-3 py-1 rounded inline-block">{Math.floor(call.duration_seconds / 60)}m {call.duration_seconds % 60}s</span>
                  </div>
+                 <div className="flex justify-between items-center py-2 border-b-2 border-dashed border-border text-lg">
+                    <span className="text-muted-foreground font-bold">Doctor Decision</span>
+                    <span className="font-extrabold bg-muted px-3 py-1 rounded inline-block uppercase">{doctorDecision || "pending"}</span>
+                 </div>
+                 <div className="flex gap-2 pt-2">
+                    {!doctorDecision && (
+                      <>
+                        <button type="button" onClick={() => setDecision("approved")} className="px-3 py-2 text-xs font-bold border-2 border-border rounded bg-emerald-100">Approve</button>
+                        <button type="button" onClick={() => setDecision("denied")} className="px-3 py-2 text-xs font-bold border-2 border-border rounded bg-rose-100">Deny</button>
+                      </>
+                    )}
+                    <button type="button" onClick={downloadReport} className="px-3 py-2 text-xs font-bold border-2 border-border rounded bg-background">
+                      Download PDF Report
+                    </button>
+                 </div>
                </div>
             </div>
+
+           {report && (
+            <div className="bg-card border-2 border-border shadow-soft rounded-xl p-6 md:p-8 space-y-4">
+              <h3 className="text-xl font-heading font-extrabold">AI clinical report (Gemini)</h3>
+              <p className="text-sm"><strong>Summary:</strong> {report.summary || vitals.Summary || "N/A"}</p>
+              <p className="text-sm"><strong>Relevant history:</strong> {report.relevant_history || vitals.RelevantHistory || "N/A"}</p>
+              <p className="text-sm"><strong>Working diagnosis:</strong> {report.diagnosis || vitals.Diagnosis || "N/A"}</p>
+              <p className="text-sm"><strong>Clinical reasoning:</strong> {report.clinical_reasoning || vitals.ClinicalReasoning || "N/A"}</p>
+              {(report.differential_diagnosis?.length || vitals.DifferentialDiagnosis?.length) ? (
+                <p className="text-sm"><strong>Differentials:</strong> {(report.differential_diagnosis || vitals.DifferentialDiagnosis || []).join("; ")}</p>
+              ) : null}
+              <p className="text-sm"><strong>Risk:</strong> {report.risk_level || "N/A"}</p>
+              <p className="text-sm"><strong>Symptoms:</strong> {(report.symptoms || vitals.Symptoms || []).join(", ") || "N/A"}</p>
+              <p className="text-sm"><strong>Follow-up plan:</strong> {report.follow_up_plan || vitals.FollowUpPlan || "N/A"}</p>
+              <p className="text-sm"><strong>Immediate action:</strong> {report.action_required || vitals.ActionRequired || "N/A"}</p>
+              {vitals.ReportPdfPath && (
+                <p className="text-xs text-muted-foreground">PDF copy path in storage: {vitals.ReportPdfPath}</p>
+              )}
+            </div>
+           )}
 
             {/* Extracted Vitals */}
             <div className="bg-card border-2 border-border shadow-soft rounded-xl p-6 md:p-8">
@@ -85,11 +188,11 @@ export default function CallDetail() {
                  Extracted Vitals
                </h3>
                
-               {Object.keys(vitals).length === 0 ? (
+               {vitalsDisplayEntries.length === 0 ? (
                  <p className="text-muted-foreground font-bold text-center py-8 border-2 border-dashed border-border rounded-lg bg-muted/20">No vitals extracted from conversation.</p>
                ) : (
                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-4">
-                    {Object.entries(vitals).map(([key, value]) => {
+                    {vitalsDisplayEntries.map(([key, value]) => {
                        // Dynamic geometric mapping
                        let Icon = Stethoscope;
                        let color = "bg-accent";

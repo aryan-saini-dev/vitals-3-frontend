@@ -1,6 +1,6 @@
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/AuthContext";
-import { Activity, Users, Bot, Bell, Phone, LogOut, Menu, X, Mic } from "lucide-react";
+import { Activity, Users, Bot, Bell, Phone, LogOut, Menu, X, Mic, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 
 const navItems = [
@@ -10,6 +10,7 @@ const navItems = [
   { name: "Alerts", href: "/dashboard/alerts", icon: Bell },
   { name: "Calls", href: "/dashboard/calls", icon: Phone },
   { name: "Simulate Web-Call", href: "/dashboard/calls/simulate", icon: Mic },
+  { name: "Misdiagnosis Solution", href: "/dashboard/misdiagnosis-solution", icon: ShieldCheck },
 ];
 
 export default function DashboardLayout() {

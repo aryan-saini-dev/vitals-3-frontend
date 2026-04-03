@@ -4,6 +4,7 @@ import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import PDFDocument from "pdfkit";
 import { VapiClient } from "@vapi-ai/server-sdk";
 import { createClient } from "@supabase/supabase-js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -27,6 +28,7 @@ app.use(
 app.use(cors({ origin: true, credentials: true }));
 
 const PORT = Number(process.env.PORT || 4000);
+const REPORTS_BUCKET = process.env.SUPABASE_REPORTS_BUCKET || "call-reports";
 
 function requireEnv(name: string): string {
   const val = process.env[name];
@@ -97,27 +99,317 @@ function parseJsonFromModelText(text: string): any {
   return JSON.parse(rawJson.trim());
 }
 
-async function generateDoctorSummaryServer(transcript: string) {
+type ReportData = {
+  summary: string;
+  diagnosis: string;
+  risk_level: string;
+  alert_type: string;
+  symptoms: string[];
+  vitals_data: Record<string, any>;
+  action_required: string;
+  /** Relevant chronic / prior context from chart + call */
+  relevant_history: string;
+  /** Brief clinical reasoning (not legal advice) */
+  clinical_reasoning: string;
+  /** Optional differentials for doctor review */
+  differential_diagnosis: string[];
+  /** Structured follow-up plan */
+  follow_up_plan: string;
+};
+
+async function authenticateRequest(accessToken: string) {
+  const supabase = createClient(requireSupabaseUrl(), requireEnv("SUPABASE_SERVICE_ROLE_KEY"));
+  const { data: authData, error: authErr } = await supabase.auth.getUser(accessToken);
+  if (authErr || !authData?.user) return null;
+  return { userId: authData.user.id, supabase };
+}
+
+function wrapTextToWidth(text: string, maxChars: number): string[] {
+  const normalized = (text || "N/A").replace(/\s+/g, " ").trim() || "N/A";
+  const words = normalized.split(" ");
+  const lines: string[] = [];
+  let line = "";
+  for (const w of words) {
+    const next = line ? `${line} ${w}` : w;
+    if (next.length <= maxChars) line = next;
+    else {
+      if (line) lines.push(line);
+      line = w.length > maxChars ? `${w.slice(0, maxChars - 1)}…` : w;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function writeParagraph(doc: InstanceType<typeof PDFDocument>, text: string, fontSize = 10) {
+  doc.fontSize(fontSize);
+  wrapTextToWidth(text, 92).forEach((ln) => doc.text(ln));
+  doc.moveDown(0.5);
+}
+
+function generateReportPdfBuffer(input: {
+  callId: string;
+  patientName: string;
+  patientCondition: string;
+  patientAge?: string;
+  durationSeconds: number;
+  transcriptSnippet?: string;
+  report: ReportData;
+}): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 48, size: "A4" });
+      const chunks: Buffer[] = [];
+      doc.on("data", (c) => chunks.push(c as Buffer));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
+
+      doc.fontSize(18).text("Vitals – Clinical Summary Report", { align: "center" });
+      doc.moveDown(0.4);
+      doc.fontSize(9).fillColor("#333333").text("(Prescription-style summary for clinician review – not a legal medical record)", {
+        align: "center",
+      });
+      doc.fillColor("black");
+      doc.moveDown(0.8);
+
+      doc.fontSize(10).text(`Generated: ${new Date().toISOString()}`);
+      doc.text(`Internal record ID: ${input.callId}`);
+      doc.text(
+        `Call duration: ${Math.floor(input.durationSeconds / 60)}m ${input.durationSeconds % 60}s`,
+      );
+      doc.moveDown(0.6);
+
+      doc.fontSize(12).text("Patient", { underline: true });
+      doc.moveDown(0.25);
+      doc.fontSize(10);
+      doc.text(`Name: ${input.patientName || "Unknown"}`);
+      doc.text(`Known condition / focus: ${input.patientCondition || "N/A"}`);
+      if (input.patientAge) doc.text(`Age: ${input.patientAge}`);
+      doc.moveDown(0.6);
+
+      doc.fontSize(12).text("Relevant history & context", { underline: true });
+      doc.moveDown(0.25);
+      writeParagraph(doc, input.report.relevant_history || "See summary below.", 10);
+
+      doc.fontSize(12).text("Executive summary", { underline: true });
+      doc.moveDown(0.25);
+      writeParagraph(doc, input.report.summary, 11);
+
+      doc.fontSize(12).text("Symptoms reported / observed", { underline: true });
+      doc.moveDown(0.25);
+      const symptoms = input.report.symptoms?.length ? input.report.symptoms : ["None explicitly stated"];
+      symptoms.forEach((s) => {
+        doc.fontSize(10).text(`• ${s}`);
+      });
+      doc.moveDown(0.5);
+
+      doc.fontSize(12).text("Clinical impression (working diagnosis)", { underline: true });
+      doc.moveDown(0.25);
+      writeParagraph(doc, input.report.diagnosis, 11);
+
+      doc.fontSize(12).text("Clinical reasoning (brief)", { underline: true });
+      doc.moveDown(0.25);
+      writeParagraph(doc, input.report.clinical_reasoning, 10);
+
+      const diffs = input.report.differential_diagnosis?.filter(Boolean) || [];
+      if (diffs.length) {
+        doc.fontSize(12).text("Differential considerations (for review)", { underline: true });
+        doc.moveDown(0.25);
+        diffs.forEach((d) => doc.fontSize(10).text(`• ${d}`));
+        doc.moveDown(0.5);
+      }
+
+      doc.fontSize(12).text("Structured vitals / measurements (from AI extract)", { underline: true });
+      doc.moveDown(0.25);
+      const vitalsEntries = Object.entries(input.report.vitals_data || {});
+      if (!vitalsEntries.length) {
+        doc.fontSize(10).text("None captured in structured form.");
+      } else {
+        vitalsEntries.forEach(([k, v]) => doc.fontSize(10).text(`${k}: ${String(v)}`));
+      }
+      doc.moveDown(0.5);
+
+      doc.fontSize(12).text("Triage / alert", { underline: true });
+      doc.moveDown(0.25);
+      doc.fontSize(10).text(`Risk level: ${input.report.risk_level || "N/A"}`);
+      doc.text(`Alert type: ${input.report.alert_type || "N/A"}`);
+      doc.moveDown(0.4);
+
+      doc.fontSize(12).text("Plan & follow-up", { underline: true });
+      doc.moveDown(0.25);
+      writeParagraph(doc, input.report.follow_up_plan || input.report.action_required, 10);
+
+      doc.fontSize(12).text("Immediate actions recommended", { underline: true });
+      doc.moveDown(0.25);
+      writeParagraph(doc, input.report.action_required, 10);
+
+      if (input.transcriptSnippet) {
+        doc.addPage();
+        doc.fontSize(12).text("Call transcript (excerpt)", { underline: true });
+        doc.moveDown(0.25);
+        const excerpt =
+          input.transcriptSnippet.length > 8000
+            ? `${input.transcriptSnippet.slice(0, 8000)}\n\n[... truncated ...]`
+            : input.transcriptSnippet;
+        writeParagraph(doc, excerpt, 9);
+      }
+
+      doc.moveDown();
+      doc.fontSize(8).fillColor("gray").text(
+        "Disclaimer: This document was produced with AI-assisted summarization and must be verified by a licensed clinician. It is not a prescription or formal diagnosis.",
+        { align: "left" },
+      );
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+async function generateDoctorSummaryServer(transcript: string, patientChartJson: string) {
   const geminiApiKey =
     process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "";
   if (!geminiApiKey) throw new Error("Missing Gemini API key env var");
   const genAI = new GoogleGenerativeAI(geminiApiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-  const prompt = `Act as a senior triage nurse. Analyze this patient call transcript and extract clinical data.
-Transcript:
+  const prompt = `You are documenting a phone check-in for a licensed clinician. Use BOTH the patient chart snippet and the call transcript.
+
+Patient chart (may be partial JSON):
+${patientChartJson || "{}"}
+
+Call transcript:
 ${transcript}
 
-Output ONLY a JSON object:
+Output ONLY a JSON object with this exact shape (no markdown outside JSON):
 {
-  "summary": "1-2 sentence clinical summary.",
+  "summary": "2-4 sentence clinical summary suitable for a handoff note.",
+  "relevant_history": "Relevant chronic conditions, prior context from chart + what the patient said about history in the call.",
+  "diagnosis": "Working clinical impression for chart review — not a definitive diagnosis.",
+  "clinical_reasoning": "2-5 sentences: why this impression, what supports/contradicts it from transcript+chart.",
+  "differential_diagnosis": ["Optional alternative 1", "Optional alternative 2"],
   "risk_level": "high" | "medium" | "low",
-  "alert_type": "Medical Title (e.g. Respiratory Distress, Routine Clear)",
-  "symptoms": ["Symptom1", "Symptom2"],
-  "vitals_data": { "key": "value" },
-  "action_required": "Clinical next step"
+  "alert_type": "Concise triage title (e.g. Hyperglycemia concern, Routine follow-up clear)",
+  "symptoms": ["Explicit symptoms or concerns from the call"],
+  "vitals_data": { "optional_key": "optional_value" },
+  "action_required": "What the doctor or care team should do next (specific).",
+  "follow_up_plan": "Follow-up timing, monitoring, education, or escalation guidance."
 }`;
   const result = await model.generateContent(prompt);
   return parseJsonFromModelText(result.response.text());
+}
+
+function normalizeReportData(raw: any): ReportData {
+  return {
+    summary: String(raw.summary || ""),
+    diagnosis: String(raw.diagnosis || ""),
+    risk_level: String(raw.risk_level || "medium"),
+    alert_type: String(raw.alert_type || ""),
+    symptoms: Array.isArray(raw.symptoms) ? raw.symptoms.map(String) : [],
+    vitals_data: (raw.vitals_data || {}) as Record<string, any>,
+    action_required: String(raw.action_required || ""),
+    relevant_history: String(raw.relevant_history || ""),
+    clinical_reasoning: String(raw.clinical_reasoning || ""),
+    differential_diagnosis: Array.isArray(raw.differential_diagnosis)
+      ? raw.differential_diagnosis.map(String)
+      : [],
+    follow_up_plan: String(raw.follow_up_plan || ""),
+  };
+}
+
+async function persistCallAndAlertAfterAnalysis(input: {
+  supabase: any;
+  docuuid: string;
+  patient_id: string;
+  agent_id: string | null;
+  duration_seconds: number;
+  transcript: string;
+  summaryRaw: any;
+  vapiCallId: string;
+  patientRow: any | null;
+}) {
+  const { supabase, docuuid, patient_id, agent_id, duration_seconds, transcript, summaryRaw, vapiCallId, patientRow } =
+    input;
+
+  const summary = normalizeReportData(summaryRaw);
+  const reportData: ReportData = summary;
+
+  const vitals_data: Record<string, any> = {
+    ...(reportData.vitals_data || {}),
+    Symptoms: reportData.symptoms,
+    Summary: reportData.summary,
+    Diagnosis: reportData.diagnosis,
+    RelevantHistory: reportData.relevant_history,
+    ClinicalReasoning: reportData.clinical_reasoning,
+    DifferentialDiagnosis: reportData.differential_diagnosis,
+    FollowUpPlan: reportData.follow_up_plan,
+    ActionRequired: reportData.action_required,
+    ReportData: reportData,
+    PatientName: patientRow?.name || "",
+    PatientCondition: patientRow?.condition || "",
+    PatientAge: patientRow?.age != null ? String(patientRow.age) : "",
+    VapiCallId: vapiCallId,
+    PdfGeneratedAt: new Date().toISOString(),
+  };
+
+  try {
+    const pdfBuffer = await generateReportPdfBuffer({
+      callId: vapiCallId,
+      patientName: String(patientRow?.name || vitals_data.PatientName || "Unknown"),
+      patientCondition: String(patientRow?.condition || vitals_data.PatientCondition || "N/A"),
+      patientAge: patientRow?.age != null ? String(patientRow.age) : vitals_data.PatientAge,
+      durationSeconds: duration_seconds,
+      transcriptSnippet: String(transcript || ""),
+      report: reportData,
+    });
+    const uploadPath = `doctor-reports/${docuuid}/${patient_id}/${vapiCallId}-${Date.now()}.pdf`;
+    const { error: uploadErr } = await supabase.storage
+      .from(REPORTS_BUCKET)
+      .upload(uploadPath, pdfBuffer, { contentType: "application/pdf", upsert: true });
+    if (!uploadErr) {
+      vitals_data.ReportPdfPath = uploadPath;
+      vitals_data.PdfStoredInStorage = true;
+      console.log("[CallPersist] PDF uploaded:", uploadPath);
+    } else {
+      vitals_data.PdfStoredInStorage = false;
+      vitals_data.PdfStorageError = uploadErr.message;
+      console.error("[CallPersist] report upload failed:", uploadErr.message);
+    }
+  } catch (reportErr) {
+    vitals_data.PdfStoredInStorage = false;
+    vitals_data.PdfGenerationError = String(reportErr);
+    console.error("[CallPersist] PDF generation failed:", reportErr);
+  }
+
+  const { data: inserted, error: callErr } = await supabase
+    .from("calls")
+    .insert({
+      docuuid,
+      patient_id,
+      agent_id: agent_id ? String(agent_id) : null,
+      duration_seconds,
+      transcript: String(transcript || ""),
+      vitals_data,
+    })
+    .select("id")
+    .single();
+
+  if (callErr) {
+    console.error("[CallPersist] call insert failed:", callErr);
+    return { ok: false as const, error: callErr.message };
+  }
+
+  const { error: alertErr } = await supabase.from("alerts").insert({
+    docuuid,
+    patient_id,
+    agent_id: agent_id ? String(agent_id) : null,
+    alert_type: reportData.alert_type,
+    severity: reportData.risk_level,
+    status: "open",
+  });
+  if (alertErr) console.error("[CallPersist] alert insert failed:", alertErr);
+
+  console.log("[CallPersist] stored call for patient:", patient_id, "db id:", inserted?.id);
+  return { ok: true as const, callId: inserted?.id as string };
 }
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -179,12 +471,9 @@ app.post("/api/vapi/outbound-call", async (req, res) => {
       return res.status(401).json({ error: "Missing Authorization Bearer token" });
     }
 
-    const supabaseUrl = requireSupabaseUrl();
-    const serviceKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
-    const supabase = createClient(supabaseUrl, serviceKey);
-    const { data: authData, error: authErr } = await supabase.auth.getUser(accessToken);
-    if (authErr || !authData?.user) return res.status(401).json({ error: "Invalid token" });
-    const userId = authData.user.id;
+    const authCtx = await authenticateRequest(accessToken);
+    if (!authCtx) return res.status(401).json({ error: "Invalid token" });
+    const { userId, supabase } = authCtx;
 
     const { patientId, destinationNumber, callerNumber } = req.body || {};
     if (!patientId || !destinationNumber) {
@@ -211,7 +500,7 @@ app.post("/api/vapi/outbound-call", async (req, res) => {
     }
 
     const vapi = new VapiClient({ token: requireEnv("VAPI_API_KEY") });
-    const call = await vapi.calls.create({
+    const call = (await vapi.calls.create({
       assistantId,
       phoneNumberId,
       customer: { number: destinationE164 },
@@ -230,7 +519,7 @@ app.post("/api/vapi/outbound-call", async (req, res) => {
         patient_id: String(patient.id),
         agent_id: patient.assigned_agent_id ? String(patient.assigned_agent_id) : null,
       },
-    } as any);
+    } as any)) as any;
 
     console.log("[Outbound] created call:", call?.id);
     return res.json({ vapiCallId: call?.id });
@@ -281,6 +570,211 @@ app.post("/api/vapi/outbound-call/:callId/hangup", async (req, res) => {
   }
 });
 
+/** When Vapi webhook cannot reach localhost, client can sync the finished call by provider id. */
+app.post("/api/vapi/sync-call", async (req, res) => {
+  try {
+    const authHeader = String(req.headers.authorization || "");
+    const accessToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+    if (!accessToken) return res.status(401).json({ error: "Missing Authorization Bearer token" });
+    const authCtx = await authenticateRequest(accessToken);
+    if (!authCtx) return res.status(401).json({ error: "Invalid token" });
+    const { userId, supabase } = authCtx;
+
+    const vapiCallId = String((req.body || {}).vapiCallId || "").trim();
+    if (!vapiCallId) return res.status(400).json({ error: "vapiCallId is required" });
+
+    const { data: existing } = await supabase
+      .from("calls")
+      .select("id")
+      .eq("docuuid", userId)
+      .filter("vitals_data->>VapiCallId", "eq", vapiCallId)
+      .maybeSingle();
+
+    if (existing?.id) {
+      return res.json({ ok: true, duplicated: true, callId: existing.id });
+    }
+
+    const vapiApiKey = requireEnv("VAPI_API_KEY");
+    const vapiResp = await fetch(`https://api.vapi.ai/call/${vapiCallId}`, {
+      headers: { Authorization: `Bearer ${vapiApiKey}` },
+    });
+    const vapiBody = await vapiResp.json().catch(() => ({}));
+    if (!vapiResp.ok) {
+      return res.status(vapiResp.status).json({
+        error: vapiBody?.message || "Could not fetch call from Vapi",
+      });
+    }
+
+    const metadata =
+      vapiBody?.metadata ||
+      vapiBody?.assistantOverrides?.metadata ||
+      vapiBody?.data?.metadata ||
+      {};
+    const docuuid = metadata?.docuuid;
+    const patient_id = metadata?.patient_id;
+    const agent_id = metadata?.agent_id;
+    if (!patient_id || docuuid !== userId) {
+      return res.status(403).json({ error: "Call metadata does not belong to this account" });
+    }
+
+    const transcript =
+      vapiBody?.transcript ||
+      vapiBody?.messages
+        ?.filter((m: any) => m.role === "bot" || m.role === "user" || m.role === "assistant")
+        ?.map((m: any) => `${m.role}: ${m.message || m.content || ""}`)
+        .join("\n") ||
+      "";
+    const durationRaw = vapiBody?.durationSeconds ?? vapiBody?.duration ?? 0;
+    const duration_seconds = typeof durationRaw === "number" ? durationRaw : Number(durationRaw) || 0;
+
+    const { data: patientRow } = await supabase
+      .from("patients")
+      .select("*")
+      .eq("id", patient_id)
+      .eq("docuuid", userId)
+      .single();
+
+    const chartJson = JSON.stringify(
+      patientRow
+        ? {
+            name: patientRow.name,
+            condition: patientRow.condition,
+            age: patientRow.age,
+            risk_level: patientRow.risk_level,
+            date_of_birth: patientRow.date_of_birth,
+          }
+        : {},
+    );
+
+    const summaryRaw = await generateDoctorSummaryServer(String(transcript || ""), chartJson);
+    const result = await persistCallAndAlertAfterAnalysis({
+      supabase,
+      docuuid: userId,
+      patient_id: String(patient_id),
+      agent_id: agent_id ? String(agent_id) : null,
+      duration_seconds,
+      transcript: String(transcript || ""),
+      summaryRaw,
+      vapiCallId,
+      patientRow,
+    });
+
+    if (!result.ok) return res.status(500).json({ error: result.error });
+    return res.json({ ok: true, callId: result.callId });
+  } catch (e: any) {
+    console.error("[SyncCall] error:", e);
+    return res.status(500).json({ error: e?.message || "Sync failed" });
+  }
+});
+
+app.get("/api/calls/:callId/report/download", async (req, res) => {
+  try {
+    const { callId } = req.params;
+    const authHeader = String(req.headers.authorization || "");
+    const accessToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+    if (!accessToken) return res.status(401).json({ error: "Missing Authorization Bearer token" });
+    const authCtx = await authenticateRequest(accessToken);
+    if (!authCtx) return res.status(401).json({ error: "Invalid token" });
+    const { userId, supabase } = authCtx;
+
+    const { data: call, error } = await supabase
+      .from("calls")
+      .select("*")
+      .eq("id", callId)
+      .eq("docuuid", userId)
+      .single();
+    if (error || !call) return res.status(404).json({ error: "Call not found" });
+
+    const reportRaw = call.vitals_data?.ReportData || null;
+    const report = reportRaw ? normalizeReportData(reportRaw) : null;
+    if (!report) return res.status(404).json({ error: "Report data not available for this call" });
+    const patientName = String(call.vitals_data?.PatientName || "Unknown");
+    const patientCondition = String(call.vitals_data?.PatientCondition || "N/A");
+    const patientAge = String(call.vitals_data?.PatientAge || "");
+    const pdf = await generateReportPdfBuffer({
+      callId: String(call.id),
+      patientName,
+      patientCondition,
+      patientAge,
+      durationSeconds: Number(call.duration_seconds || 0),
+      transcriptSnippet: String(call.transcript || ""),
+      report,
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="doctor-report-${call.id}.pdf"`);
+    return res.send(pdf);
+  } catch (e: any) {
+    console.error("[ReportDownload] error:", e);
+    return res.status(500).json({ error: e?.message || "Report download failed" });
+  }
+});
+
+app.post("/api/calls/:callId/decision", async (req, res) => {
+  try {
+    const { callId } = req.params;
+    const { decision } = req.body || {};
+    if (!["approved", "denied"].includes(String(decision))) {
+      return res.status(400).json({ error: "decision must be approved or denied" });
+    }
+    const authHeader = String(req.headers.authorization || "");
+    const accessToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+    if (!accessToken) return res.status(401).json({ error: "Missing Authorization Bearer token" });
+    const authCtx = await authenticateRequest(accessToken);
+    if (!authCtx) return res.status(401).json({ error: "Invalid token" });
+    const { userId, supabase } = authCtx;
+
+    const { data: call, error: callErr } = await supabase
+      .from("calls")
+      .select("*")
+      .eq("id", callId)
+      .eq("docuuid", userId)
+      .single();
+    if (callErr || !call) return res.status(404).json({ error: "Call not found" });
+
+    const nextVitals = {
+      ...(call.vitals_data || {}),
+      DoctorDecision: decision,
+      DoctorDecisionAt: new Date().toISOString(),
+    };
+    const { error: updateCallErr } = await supabase
+      .from("calls")
+      .update({ vitals_data: nextVitals })
+      .eq("id", callId)
+      .eq("docuuid", userId);
+    if (updateCallErr) return res.status(500).json({ error: updateCallErr.message });
+
+    const { data: alertRow } = await supabase
+      .from("alerts")
+      .select("id")
+      .eq("docuuid", userId)
+      .eq("patient_id", call.patient_id)
+      .eq("status", "open")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (alertRow?.id) {
+      const { error: alertUpdateErr } = await supabase
+        .from("alerts")
+        .update({ status: decision })
+        .eq("id", alertRow.id)
+        .eq("docuuid", userId);
+      if (alertUpdateErr) console.error("[Decision] alert update failed:", alertUpdateErr);
+    }
+
+    return res.json({ ok: true, decision });
+  } catch (e: any) {
+    console.error("[Decision] error:", e);
+    return res.status(500).json({ error: e?.message || "Decision update failed" });
+  }
+});
+
 app.post("/api/vapi/webhook", async (req, res) => {
   try {
     const secret = process.env.VAPI_WEBHOOK_SECRET;
@@ -323,35 +817,55 @@ app.post("/api/vapi/webhook", async (req, res) => {
       requireEnv("SUPABASE_SERVICE_ROLE_KEY"),
     );
 
-    const summary = await generateDoctorSummaryServer(String(transcript || ""));
-    const vitals_data = {
-      ...(summary.vitals_data || {}),
-      Symptoms: summary.symptoms ?? [],
-      Summary: summary.summary ?? "",
-      ActionRequired: summary.action_required ?? "",
-    };
+    const vapiCallId = String(
+      payload?.id || payload?.callId || payload?.call?.id || payload?.data?.id || "",
+    );
+    if (vapiCallId) {
+      const { data: dup } = await supabase
+        .from("calls")
+        .select("id")
+        .eq("docuuid", docuuid)
+        .filter("vitals_data->>VapiCallId", "eq", vapiCallId)
+        .maybeSingle();
+      if (dup?.id) {
+        console.log("[Webhook] duplicate Vapi call skipped:", vapiCallId);
+        return res.json({ received: true, duplicate: true });
+      }
+    }
 
-    const { error: callErr } = await supabase.from("calls").insert({
+    const { data: patientRow } = await supabase
+      .from("patients")
+      .select("*")
+      .eq("id", patient_id)
+      .eq("docuuid", docuuid)
+      .single();
+
+    const chartJson = JSON.stringify(
+      patientRow
+        ? {
+            name: patientRow.name,
+            condition: patientRow.condition,
+            age: patientRow.age,
+            risk_level: patientRow.risk_level,
+            date_of_birth: patientRow.date_of_birth,
+          }
+        : {},
+    );
+
+    const summaryRaw = await generateDoctorSummaryServer(String(transcript || ""), chartJson);
+    await persistCallAndAlertAfterAnalysis({
+      supabase,
       docuuid,
-      patient_id,
+      patient_id: String(patient_id),
       agent_id: agent_id ? String(agent_id) : null,
       duration_seconds,
       transcript: String(transcript || ""),
-      vitals_data,
+      summaryRaw,
+      vapiCallId: vapiCallId || `unknown-${Date.now()}`,
+      patientRow,
     });
-    if (callErr) console.error("[Webhook] call insert failed:", callErr);
 
-    const { error: alertErr } = await supabase.from("alerts").insert({
-      docuuid,
-      patient_id,
-      agent_id: agent_id ? String(agent_id) : null,
-      alert_type: summary.alert_type,
-      severity: summary.risk_level,
-      status: "open",
-    });
-    if (alertErr) console.error("[Webhook] alert insert failed:", alertErr);
-
-    console.log("[Webhook] stored summary for patient:", patient_id);
+    console.log("[Webhook] processed call for patient:", patient_id);
     return res.json({ received: true });
   } catch (e: any) {
     console.error("[Webhook] fatal error:", e);

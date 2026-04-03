@@ -1,7 +1,8 @@
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/AuthContext";
+import { apiUrl } from "@/lib/api";
 import { Activity, Users, Bot, Bell, Phone, LogOut, Menu, X, Mic, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const navItems = [
   { name: "Overview", href: "/dashboard", icon: Activity },
@@ -14,10 +15,35 @@ const navItems = [
 ];
 
 export default function DashboardLayout() {
-  const { signOut, user } = useAuth();
+  const { signOut, user, session } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [openAlertsCount, setOpenAlertsCount] = useState(0);
+
+  useEffect(() => {
+    if (!session?.access_token) return;
+    const load = async () => {
+      try {
+        const r = await fetch(apiUrl("/api/alerts"), {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        const d = await r.json().catch(() => ({}));
+        const list = Array.isArray(d.alerts) ? d.alerts : [];
+        setOpenAlertsCount(list.filter((a: { status?: string }) => a.status === "open").length);
+      } catch {
+        setOpenAlertsCount(0);
+      }
+    };
+    void load();
+    const t = window.setInterval(load, 20000);
+    const onInv = () => void load();
+    window.addEventListener("vitals:invalidate-lists", onInv);
+    return () => {
+      window.clearInterval(t);
+      window.removeEventListener("vitals:invalidate-lists", onInv);
+    };
+  }, [session?.access_token]);
 
   const handleSignOut = async () => {
     await signOut();
@@ -47,8 +73,13 @@ export default function DashboardLayout() {
                     : "text-muted-foreground hover:bg-muted hover:text-foreground border-2 border-transparent"
                 }`}
               >
-                <item.icon className="w-5 h-5" strokeWidth={2.5} />
-                {item.name}
+                <item.icon className="w-5 h-5 shrink-0" strokeWidth={2.5} />
+                <span className="flex-1 min-w-0">{item.name}</span>
+                {item.href === "/dashboard/alerts" && openAlertsCount > 0 ? (
+                  <span className="shrink-0 min-w-[1.5rem] h-7 px-2 rounded-full bg-destructive text-white text-xs font-black flex items-center justify-center border-2 border-border">
+                    {openAlertsCount > 9 ? "9+" : openAlertsCount}
+                  </span>
+                ) : null}
               </Link>
             );
           })}
@@ -103,8 +134,13 @@ export default function DashboardLayout() {
                         location.pathname === item.href ? "bg-secondary text-white border-border shadow-pop" : "border-transparent"
                       }`}
                     >
-                      <item.icon className="w-5 h-5" />
-                      {item.name}
+                      <item.icon className="w-5 h-5 shrink-0" />
+                      <span className="flex-1">{item.name}</span>
+                      {item.href === "/dashboard/alerts" && openAlertsCount > 0 ? (
+                        <span className="min-w-[1.5rem] h-7 px-2 rounded-full bg-destructive text-white text-xs font-black flex items-center justify-center">
+                          {openAlertsCount > 9 ? "9+" : openAlertsCount}
+                        </span>
+                      ) : null}
                     </Link>
                   ))}
                 </nav>

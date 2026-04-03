@@ -1,55 +1,56 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/AuthContext";
+import { apiUrl } from "@/lib/api";
 import { Bell, CheckCircle2 } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 
 export default function Alerts() {
-  const { user, session } = useAuth();
+  const { user, session, isLoading: authLoading } = useAuth();
   const location = useLocation();
   const [alerts, setAlerts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchAlerts();
-  }, [user]);
-
-  async function fetchAlerts() {
-    if (!user) return;
+  const fetchAlerts = useCallback(async (silent = false) => {
+    if (!session) return;
     try {
-      const [alertsRes, patsRes, agentsRes, callsRes] = await Promise.all([
-        supabase.from("alerts").select("*").eq("docuuid", user.id).order("created_at", { ascending: false }),
-        supabase.from("patients").select("*").eq("docuuid", user.id),
-        supabase.from("agents").select("*").eq("docuuid", user.id),
-        supabase.from("calls").select("*").eq("docuuid", user.id).order("created_at", { ascending: false }),
-      ]);
-      
-      if (alertsRes.error) {
-         console.error("ALERTS DB ERROR:", alertsRes.error.message, alertsRes.error.details);
-         alert(`Supabase Error Fetching Alerts:\n${alertsRes.error.message}\nMake sure your alerts table has created_at and docuuid columns.`);
+      if (!silent) setLoading(true);
+      const resp = await fetch(apiUrl("/api/alerts"), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        console.error("Alerts API error", data);
+        toast.error(typeof data?.error === "string" ? data.error : "Failed to load alerts");
+        setAlerts([]);
+        return;
       }
-
-      if (alertsRes.data) {
-        const merged = alertsRes.data.map(alert => {
-           const pat = patsRes.data?.find(p => p.id === alert.patient_id);
-           const ag = agentsRes.data?.find(a => a.id === alert.agent_id);
-           const callForAlert = callsRes.data?.find((c) => c.patient_id === alert.patient_id);
-           return {
-             ...alert,
-             patient_name: pat?.name || "Unknown",
-             agent_name: ag?.name || "Unknown",
-             call: callForAlert || null,
-           };
-        });
-        setAlerts(merged);
-      }
+      setAlerts(Array.isArray(data.alerts) ? data.alerts : []);
     } catch (e) {
       console.error(e);
+      toast.error("Failed to load alerts");
+      setAlerts([]);
     } finally {
       setLoading(false);
     }
-  }
+  }, [session]);
+
+  useEffect(() => {
+    if (authLoading) return;
+    if (!user || !session) {
+      setLoading(false);
+      setAlerts([]);
+      return;
+    }
+    void fetchAlerts();
+  }, [authLoading, fetchAlerts, user, session]);
+
+  useEffect(() => {
+    const fn = () => void fetchAlerts(true);
+    window.addEventListener("vitals:invalidate-lists", fn);
+    return () => window.removeEventListener("vitals:invalidate-lists", fn);
+  }, [fetchAlerts]);
 
   const markResolved = async (id: string, e: React.MouseEvent) => {
     e.preventDefault();
@@ -68,7 +69,7 @@ export default function Alerts() {
     e.preventDefault();
     e.stopPropagation();
     if (!session) return;
-    const resp = await fetch(`http://localhost:4000/api/calls/${callId}/decision`, {
+    const resp = await fetch(apiUrl(`/api/calls/${callId}/decision`), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -89,7 +90,7 @@ export default function Alerts() {
     e.preventDefault();
     e.stopPropagation();
     if (!session) return;
-    const resp = await fetch(`http://localhost:4000/api/calls/${callId}/report/download`, {
+    const resp = await fetch(apiUrl(`/api/calls/${callId}/report/download`), {
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
     if (!resp.ok) {

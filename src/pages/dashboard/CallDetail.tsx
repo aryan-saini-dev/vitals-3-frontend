@@ -1,41 +1,50 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/AuthContext";
+import { apiUrl } from "@/lib/api";
 import { ArrowLeft, Phone, Activity, Heart, Wind, Stethoscope } from "lucide-react";
 
 export default function CallDetail() {
   const { id } = useParams();
-  const { user, session } = useAuth();
+  const { session, isLoading: authLoading } = useAuth();
   const [call, setCall] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    async function fetchCall() {
-      if (!user || !id) return;
-      const { data: callData } = await supabase
-        .from("calls")
-        .select("*")
-        .eq("id", id)
-        .eq("docuuid", user.id)
-        .single();
-
-      if (callData) {
-         const [patRes, agRes] = await Promise.all([
-            callData.patient_id ? supabase.from("patients").select("name").eq("id", callData.patient_id).single() : Promise.resolve({ data: null }),
-            callData.agent_id ? supabase.from("agents").select("name").eq("id", callData.agent_id).single() : Promise.resolve({ data: null })
-         ]);
-         
-         setCall({
-            ...callData,
-            patient_name: patRes.data?.name || 'Unknown',
-            agent_name: agRes.data?.name || 'Unknown'
-         });
-      }
+    if (!id) {
       setLoading(false);
+      return;
     }
-    fetchCall();
-  }, [user, id]);
+    if (authLoading) return;
+    if (!session?.access_token) {
+      setLoading(false);
+      setCall(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const resp = await fetch(apiUrl(`/api/calls/${encodeURIComponent(id)}/detail`), {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!cancelled) {
+          if (resp.ok && data.call) setCall(data.call);
+          else setCall(null);
+        }
+      } catch {
+        if (!cancelled) setCall(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session, id, authLoading]);
 
   if (loading) return <div className="p-8 text-center text-muted-foreground font-bold animate-pulse">Loading call log...</div>;
   if (!call) return <div className="p-8 text-center text-muted-foreground font-bold">Call record not found.</div>;
@@ -43,6 +52,11 @@ export default function CallDetail() {
   const vitals = call.vitals_data || {};
   const report = vitals.ReportData || null;
   const doctorDecision = vitals.DoctorDecision || null;
+  const hasAiNarrative =
+    report ||
+    vitals.Summary ||
+    vitals.Diagnosis ||
+    (Array.isArray(vitals.Symptoms) && vitals.Symptoms.length > 0);
 
   const vitalsDisplayEntries = Object.entries(vitals).filter(([key, value]) => {
     if (
@@ -77,7 +91,7 @@ export default function CallDetail() {
 
   async function downloadReport() {
     if (!session || !id) return;
-    const resp = await fetch(`http://localhost:4000/api/calls/${id}/report/download`, {
+    const resp = await fetch(apiUrl(`/api/calls/${id}/report/download`), {
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
     if (!resp.ok) return;
@@ -92,7 +106,7 @@ export default function CallDetail() {
 
   async function setDecision(decision: "approved" | "denied") {
     if (!session || !id) return;
-    const resp = await fetch(`http://localhost:4000/api/calls/${id}/decision`, {
+    const resp = await fetch(apiUrl(`/api/calls/${id}/decision`), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -159,20 +173,28 @@ export default function CallDetail() {
                </div>
             </div>
 
-           {report && (
+           {hasAiNarrative && (
             <div className="bg-card border-2 border-border shadow-soft rounded-xl p-6 md:p-8 space-y-4">
-              <h3 className="text-xl font-heading font-extrabold">AI clinical report (Gemini)</h3>
-              <p className="text-sm"><strong>Summary:</strong> {report.summary || vitals.Summary || "N/A"}</p>
-              <p className="text-sm"><strong>Relevant history:</strong> {report.relevant_history || vitals.RelevantHistory || "N/A"}</p>
-              <p className="text-sm"><strong>Working diagnosis:</strong> {report.diagnosis || vitals.Diagnosis || "N/A"}</p>
-              <p className="text-sm"><strong>Clinical reasoning:</strong> {report.clinical_reasoning || vitals.ClinicalReasoning || "N/A"}</p>
-              {(report.differential_diagnosis?.length || vitals.DifferentialDiagnosis?.length) ? (
-                <p className="text-sm"><strong>Differentials:</strong> {(report.differential_diagnosis || vitals.DifferentialDiagnosis || []).join("; ")}</p>
+              <h3 className="text-xl font-heading font-extrabold">AI clinical report (live)</h3>
+              <p className="text-sm"><strong>Summary:</strong> {report?.summary || vitals.Summary || "N/A"}</p>
+              <p className="text-sm"><strong>Relevant history:</strong> {report?.relevant_history || vitals.RelevantHistory || "N/A"}</p>
+              <p className="text-sm"><strong>Working diagnosis:</strong> {report?.diagnosis || vitals.Diagnosis || "N/A"}</p>
+              <p className="text-sm"><strong>Clinical reasoning:</strong> {report?.clinical_reasoning || vitals.ClinicalReasoning || "N/A"}</p>
+              {(report?.differential_diagnosis?.length || vitals.DifferentialDiagnosis?.length) ? (
+                <p className="text-sm"><strong>Differentials:</strong> {(report?.differential_diagnosis || vitals.DifferentialDiagnosis || []).join("; ")}</p>
               ) : null}
-              <p className="text-sm"><strong>Risk:</strong> {report.risk_level || "N/A"}</p>
-              <p className="text-sm"><strong>Symptoms:</strong> {(report.symptoms || vitals.Symptoms || []).join(", ") || "N/A"}</p>
-              <p className="text-sm"><strong>Follow-up plan:</strong> {report.follow_up_plan || vitals.FollowUpPlan || "N/A"}</p>
-              <p className="text-sm"><strong>Immediate action:</strong> {report.action_required || vitals.ActionRequired || "N/A"}</p>
+              <p className="text-sm"><strong>Risk:</strong> {report?.risk_level || vitals.RiskLevel || "N/A"}</p>
+              <p className="text-sm">
+                <strong>Symptoms:</strong>{" "}
+                {(() => {
+                  const s = report?.symptoms ?? vitals.Symptoms;
+                  if (Array.isArray(s) && s.length) return s.join(", ");
+                  return "N/A";
+                })()}
+              </p>
+              <p className="text-sm"><strong>Alert focus:</strong> {report?.alert_type || vitals.AlertType || "N/A"}</p>
+              <p className="text-sm"><strong>Follow-up plan:</strong> {report?.follow_up_plan || vitals.FollowUpPlan || "N/A"}</p>
+              <p className="text-sm"><strong>Immediate action:</strong> {report?.action_required || vitals.ActionRequired || "N/A"}</p>
               {vitals.ReportPdfPath && (
                 <p className="text-xs text-muted-foreground">PDF copy path in storage: {vitals.ReportPdfPath}</p>
               )}

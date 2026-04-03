@@ -1,47 +1,44 @@
-import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/lib/AuthContext";
+import { apiUrl } from "@/lib/api";
 import { Phone, PhoneCall, Search } from "lucide-react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 
 export default function Calls() {
-  const { user, session } = useAuth();
+  const { user, session, isLoading: authLoading } = useAuth();
   const [calls, setCalls] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
 
-  async function loadCalls() {
-    if (!user) return;
-    setLoading(true);
+  const loadCalls = useCallback(async (silent = false) => {
+    if (!user || !session) return;
+    if (!silent) setLoading(true);
     try {
-      const [callsRes, patsRes, agentsRes] = await Promise.all([
-        supabase.from("calls").select("*").eq("docuuid", user.id).order("created_at", { ascending: false }),
-        supabase.from("patients").select("*").eq("docuuid", user.id),
-        supabase.from("agents").select("*").eq("docuuid", user.id),
-      ]);
-
-      if (callsRes.error) console.error("Calls error", callsRes.error);
-
-      if (callsRes.data) {
-        const merged = callsRes.data.map((call) => {
-          const p = patsRes.data?.find((p) => p.id === call.patient_id);
-          const a = agentsRes.data?.find((a) => a.id === call.agent_id);
-          return { ...call, patient_name: p?.name || "Unknown", agent_name: a?.name || "Unknown" };
-        });
-        setCalls(merged);
+      const resp = await fetch(apiUrl("/api/calls/list"), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        console.error("Calls API error", data);
+        toast.error(typeof data?.error === "string" ? data.error : "Failed to load calls");
+        setCalls([]);
+        return;
       }
+      setCalls(Array.isArray(data.calls) ? data.calls : []);
     } catch (e) {
       console.error(e);
+      toast.error("Failed to load calls");
+      setCalls([]);
     } finally {
       setLoading(false);
     }
-  }
+  }, [user, session]);
 
   async function downloadReport(callId: string) {
     if (!session) return;
     try {
-      const resp = await fetch(`http://localhost:4000/api/calls/${callId}/report/download`, {
+      const resp = await fetch(apiUrl(`/api/calls/${callId}/report/download`), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!resp.ok) {
@@ -64,7 +61,7 @@ export default function Calls() {
   async function setDecision(call: any, decision: "approved" | "denied") {
     if (!session) return;
     try {
-      const resp = await fetch(`http://localhost:4000/api/calls/${call.id}/decision`, {
+      const resp = await fetch(apiUrl(`/api/calls/${call.id}/decision`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -94,8 +91,20 @@ export default function Calls() {
   }
 
   useEffect(() => {
-    loadCalls();
-  }, [user]);
+    if (authLoading) return;
+    if (!user || !session) {
+      setLoading(false);
+      setCalls([]);
+      return;
+    }
+    void loadCalls();
+  }, [authLoading, loadCalls, user, session]);
+
+  useEffect(() => {
+    const fn = () => void loadCalls(true);
+    window.addEventListener("vitals:invalidate-lists", fn);
+    return () => window.removeEventListener("vitals:invalidate-lists", fn);
+  }, [loadCalls]);
 
   const filteredCalls = calls.filter(c => 
     c.patient_name.toLowerCase().includes(search.toLowerCase()) || 

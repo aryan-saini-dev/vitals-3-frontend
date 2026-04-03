@@ -1,8 +1,12 @@
 import express from "express";
 import cors from "cors";
 import crypto from "crypto";
+import http from "http";
 import path from "path";
+import { createRequire } from "module";
 import { fileURLToPath } from "url";
+
+const nodeRequire = createRequire(import.meta.url);
 import dotenv from "dotenv";
 import PDFDocument from "pdfkit";
 import { VapiClient } from "@vapi-ai/server-sdk";
@@ -16,6 +20,13 @@ const projectRoot = path.resolve(__dirname, "..");
 // Load env from project root (not cwd) so `npm run dev:server` always sees VITE_* vars.
 dotenv.config({ path: path.join(projectRoot, ".env") });
 dotenv.config({ path: path.join(projectRoot, ".env.local") });
+
+try {
+  const expressVer = nodeRequire("express/package.json").version;
+  console.log("[Server] boot Vitals API — Express", expressVer);
+} catch {
+  console.log("[Server] boot Vitals API");
+}
 
 const app = express();
 app.use(
@@ -122,6 +133,51 @@ async function authenticateRequest(accessToken: string) {
   const { data: authData, error: authErr } = await supabase.auth.getUser(accessToken);
   if (authErr || !authData?.user) return null;
   return { userId: authData.user.id, supabase };
+}
+
+/**
+ * Vapi GET /call and webhooks expose metadata in different shapes; outbound calls also put patientId in variableValues.
+ */
+function extractVapiPersistContext(vapiBody: any): {
+  patient_id: string | null;
+  agent_id: string | null;
+  metadataDocuuid: string | null;
+} {
+  const metadata =
+    vapiBody?.metadata ||
+    vapiBody?.call?.metadata ||
+    vapiBody?.data?.metadata ||
+    {};
+  const assistantOverrides =
+    vapiBody?.assistantOverrides || vapiBody?.call?.assistantOverrides || {};
+  const variableValues = assistantOverrides?.variableValues || {};
+
+  const patient_id =
+    metadata?.patient_id != null
+      ? String(metadata.patient_id).trim()
+      : metadata?.patientId != null
+        ? String(metadata.patientId).trim()
+        : variableValues?.patientId != null
+          ? String(variableValues.patientId).trim()
+          : null;
+
+  const agent_id =
+    metadata?.agent_id != null
+      ? String(metadata.agent_id).trim()
+      : metadata?.agentId != null
+        ? String(metadata.agentId).trim()
+        : null;
+
+  const metadataDocuuid =
+    metadata?.docuuid != null && String(metadata.docuuid).trim() !== ""
+      ? String(metadata.docuuid).trim()
+      : null;
+
+  return {
+    patient_id: patient_id || null,
+    agent_id: agent_id || null,
+    metadataDocuuid,
+  };
 }
 
 function wrapTextToWidth(text: string, maxChars: number): string[] {
@@ -414,6 +470,8 @@ async function persistCallAndAlertAfterAnalysis(input: {
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+app.get("/api/ping", (_req, res) => res.json({ ok: true, service: "vitals-api" }));
+
 app.get("/api/debug/vapi-config", (_req, res) => {
   const phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID || "";
   const assistantId = process.env.VAPI_ASSISTANT_ID || "";
@@ -589,7 +647,7 @@ app.post("/api/vapi/sync-call", async (req, res) => {
       .from("calls")
       .select("id")
       .eq("docuuid", userId)
-      .filter("vitals_data->>VapiCallId", "eq", vapiCallId)
+      .contains("vitals_data", { VapiCallId: vapiCallId })
       .maybeSingle();
 
     if (existing?.id) {
@@ -607,15 +665,14 @@ app.post("/api/vapi/sync-call", async (req, res) => {
       });
     }
 
-    const metadata =
-      vapiBody?.metadata ||
-      vapiBody?.assistantOverrides?.metadata ||
-      vapiBody?.data?.metadata ||
-      {};
-    const docuuid = metadata?.docuuid;
-    const patient_id = metadata?.patient_id;
-    const agent_id = metadata?.agent_id;
-    if (!patient_id || docuuid !== userId) {
+    const ctx = extractVapiPersistContext(vapiBody);
+    if (!ctx.patient_id) {
+      return res.status(400).json({
+        error:
+          "Could not determine patient for this call. Vapi did not return patient metadata (patient_id / patientId / variableValues.patientId).",
+      });
+    }
+    if (ctx.metadataDocuuid && ctx.metadataDocuuid !== userId) {
       return res.status(403).json({ error: "Call metadata does not belong to this account" });
     }
 
@@ -632,9 +689,17 @@ app.post("/api/vapi/sync-call", async (req, res) => {
     const { data: patientRow } = await supabase
       .from("patients")
       .select("*")
-      .eq("id", patient_id)
+      .eq("id", ctx.patient_id)
       .eq("docuuid", userId)
       .single();
+
+    if (!patientRow) {
+      return res.status(403).json({ error: "Patient not found for this account" });
+    }
+
+    const agentResolved =
+      ctx.agent_id ||
+      (patientRow.assigned_agent_id != null ? String(patientRow.assigned_agent_id) : null);
 
     const chartJson = JSON.stringify(
       patientRow
@@ -652,8 +717,8 @@ app.post("/api/vapi/sync-call", async (req, res) => {
     const result = await persistCallAndAlertAfterAnalysis({
       supabase,
       docuuid: userId,
-      patient_id: String(patient_id),
-      agent_id: agent_id ? String(agent_id) : null,
+      patient_id: String(ctx.patient_id),
+      agent_id: agentResolved,
       duration_seconds,
       transcript: String(transcript || ""),
       summaryRaw,
@@ -666,6 +731,138 @@ app.post("/api/vapi/sync-call", async (req, res) => {
   } catch (e: any) {
     console.error("[SyncCall] error:", e);
     return res.status(500).json({ error: e?.message || "Sync failed" });
+  }
+});
+
+/** Register `/api/calls/list` before any `/api/calls/:callId/...` route (Express matches in order). */
+app.get("/api/calls/list", async (req, res) => {
+  try {
+    const authHeader = String(req.headers.authorization || "");
+    const accessToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+    if (!accessToken) return res.status(401).json({ error: "Missing Authorization Bearer token" });
+    const authCtx = await authenticateRequest(accessToken);
+    if (!authCtx) return res.status(401).json({ error: "Invalid token" });
+    const { userId, supabase } = authCtx;
+    const patientIdFilter = String((req.query as any).patientId || "").trim();
+    const vapiCallIdFilter = String((req.query as any).vapiCallId || "").trim();
+
+    let listQuery = supabase.from("calls").select("*").eq("docuuid", userId);
+    if (patientIdFilter) listQuery = listQuery.eq("patient_id", patientIdFilter);
+    if (vapiCallIdFilter) listQuery = listQuery.contains("vitals_data", { VapiCallId: vapiCallIdFilter });
+    const { data: calls, error: callsErr } = await listQuery.order("created_at", { ascending: false });
+
+    if (callsErr) {
+      console.error("[CallsList] query error:", callsErr);
+      return res.status(500).json({ error: callsErr.message });
+    }
+
+    const rows = calls || [];
+    const patientIds = [...new Set(rows.map((c: any) => c.patient_id).filter(Boolean))];
+    const agentIds = [...new Set(rows.map((c: any) => c.agent_id).filter(Boolean))];
+
+    const [patsRes, agsRes] = await Promise.all([
+      patientIds.length
+        ? supabase.from("patients").select("id,name").eq("docuuid", userId).in("id", patientIds)
+        : Promise.resolve({ data: [] as any[] }),
+      agentIds.length
+        ? supabase.from("agents").select("id,name").eq("docuuid", userId).in("id", agentIds)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+
+    const pMap = Object.fromEntries((patsRes.data || []).map((p: any) => [p.id, p.name]));
+    const aMap = Object.fromEntries((agsRes.data || []).map((a: any) => [a.id, a.name]));
+
+    const merged = rows.map((c: any) => ({
+      ...c,
+      patient_name: pMap[c.patient_id] || "Unknown",
+      agent_name: c.agent_id ? aMap[c.agent_id] || "Unknown" : "Unknown",
+    }));
+
+    return res.json({ calls: merged });
+  } catch (e: any) {
+    console.error("[CallsList] error:", e);
+    return res.status(500).json({ error: e?.message || "Failed to load calls" });
+  }
+});
+
+/** Alerts list with patient/agent names and latest matching call per patient (same RLS bypass as calls). */
+app.get("/api/alerts", async (req, res) => {
+  try {
+    const authHeader = String(req.headers.authorization || "");
+    const accessToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+    if (!accessToken) return res.status(401).json({ error: "Missing Authorization Bearer token" });
+    const authCtx = await authenticateRequest(accessToken);
+    if (!authCtx) return res.status(401).json({ error: "Invalid token" });
+    const { userId, supabase } = authCtx;
+
+    const [{ data: alertRows, error: alertsErr }, { data: callRows }] = await Promise.all([
+      supabase.from("alerts").select("*").eq("docuuid", userId).order("created_at", { ascending: false }),
+      supabase.from("calls").select("*").eq("docuuid", userId).order("created_at", { ascending: false }),
+    ]);
+
+    if (alertsErr) {
+      console.error("[AlertsList] query error:", alertsErr);
+      return res.status(500).json({ error: alertsErr.message });
+    }
+
+    const calls = callRows || [];
+    const callsByPatient = new Map<string, any[]>();
+    for (const c of calls) {
+      const pid = c.patient_id;
+      if (!pid) continue;
+      if (!callsByPatient.has(pid)) callsByPatient.set(pid, []);
+      callsByPatient.get(pid)!.push(c);
+    }
+    for (const [, arr] of callsByPatient) {
+      arr.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+    }
+
+    const alerts = alertRows || [];
+    const patientIds = [...new Set(alerts.map((a: any) => a.patient_id).filter(Boolean))];
+    const agentIds = [...new Set(alerts.map((a: any) => a.agent_id).filter(Boolean))];
+
+    const [patsRes, agsRes] = await Promise.all([
+      patientIds.length
+        ? supabase.from("patients").select("id,name").eq("docuuid", userId).in("id", patientIds)
+        : Promise.resolve({ data: [] as any[] }),
+      agentIds.length
+        ? supabase.from("agents").select("id,name").eq("docuuid", userId).in("id", agentIds)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+
+    const pMap = Object.fromEntries((patsRes.data || []).map((p: any) => [p.id, p.name]));
+    const aMap = Object.fromEntries((agsRes.data || []).map((a: any) => [a.id, a.name]));
+
+    const pickCallForAlert = (patientId: string, alertCreated: string | null) => {
+      const list = callsByPatient.get(patientId);
+      if (!list?.length) return null;
+      const alertMs = alertCreated ? new Date(alertCreated).getTime() : 0;
+      if (alertMs) {
+        const windowMs = 5 * 60 * 1000;
+        const near = list.find((c) => {
+          const t = c.created_at ? new Date(c.created_at).getTime() : 0;
+          return t && Math.abs(t - alertMs) <= windowMs;
+        });
+        if (near) return near;
+      }
+      return list[0];
+    };
+
+    const merged = alerts.map((a: any) => ({
+      ...a,
+      patient_name: pMap[a.patient_id] || "Unknown",
+      agent_name: a.agent_id ? aMap[a.agent_id] || "Unknown" : "Unknown",
+      call: pickCallForAlert(a.patient_id, a.created_at),
+    }));
+
+    return res.json({ alerts: merged });
+  } catch (e: any) {
+    console.error("[AlertsList] error:", e);
+    return res.status(500).json({ error: e?.message || "Failed to load alerts" });
   }
 });
 
@@ -711,6 +908,49 @@ app.get("/api/calls/:callId/report/download", async (req, res) => {
   } catch (e: any) {
     console.error("[ReportDownload] error:", e);
     return res.status(500).json({ error: e?.message || "Report download failed" });
+  }
+});
+
+app.get("/api/calls/:callId/detail", async (req, res) => {
+  try {
+    const { callId } = req.params;
+    const authHeader = String(req.headers.authorization || "");
+    const accessToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+    if (!accessToken) return res.status(401).json({ error: "Missing Authorization Bearer token" });
+    const authCtx = await authenticateRequest(accessToken);
+    if (!authCtx) return res.status(401).json({ error: "Invalid token" });
+    const { userId, supabase } = authCtx;
+
+    const { data: call, error } = await supabase
+      .from("calls")
+      .select("*")
+      .eq("id", callId)
+      .eq("docuuid", userId)
+      .single();
+
+    if (error || !call) return res.status(404).json({ error: "Call not found" });
+
+    const [patRes, agRes] = await Promise.all([
+      call.patient_id
+        ? supabase.from("patients").select("name").eq("id", call.patient_id).eq("docuuid", userId).maybeSingle()
+        : Promise.resolve({ data: null }),
+      call.agent_id
+        ? supabase.from("agents").select("name").eq("id", call.agent_id).eq("docuuid", userId).maybeSingle()
+        : Promise.resolve({ data: null }),
+    ]);
+
+    return res.json({
+      call: {
+        ...call,
+        patient_name: patRes.data?.name || "Unknown",
+        agent_name: agRes.data?.name || "Unknown",
+      },
+    });
+  } catch (e: any) {
+    console.error("[CallDetailApi] error:", e);
+    return res.status(500).json({ error: e?.message || "Failed to load call" });
   }
 });
 
@@ -825,7 +1065,7 @@ app.post("/api/vapi/webhook", async (req, res) => {
         .from("calls")
         .select("id")
         .eq("docuuid", docuuid)
-        .filter("vitals_data->>VapiCallId", "eq", vapiCallId)
+        .contains("vitals_data", { VapiCallId: vapiCallId })
         .maybeSingle();
       if (dup?.id) {
         console.log("[Webhook] duplicate Vapi call skipped:", vapiCallId);
@@ -873,8 +1113,29 @@ app.post("/api/vapi/webhook", async (req, res) => {
   }
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`[Server] listening on http://localhost:${PORT}`);
+app.use((req, res) => {
+  if (String(req.originalUrl || "").startsWith("/api")) {
+    console.warn("[Server] API 404:", req.method, req.originalUrl);
+  }
+  res.status(404).json({ error: "Not found", path: req.originalUrl });
+});
+
+const server = http.createServer(app);
+
+server.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`[Server] Port ${PORT} is already in use — the API did not start.`);
+    console.error("[Server] Another `npm run dev` / `tsx server` may still be running, or another app owns this port.");
+    console.error(`[Server] Free it:  npm run free:api-port`);
+    console.error(`[Server] Or use another port in .env.local — set both:\n  PORT=4001\n  VITE_DEV_API_PORT=4001`);
+    process.exit(1);
+  }
+  console.error("[Server] HTTP server error:", err);
+  process.exit(1);
+});
+
+server.listen(PORT, () => {
+  console.log(`[Server] listening on http://127.0.0.1:${PORT} (GET /api/calls/list — call list)`);
 });
 
 server.on("close", () => {

@@ -4,6 +4,10 @@ import { supabase } from "@/lib/supabase";
 import { Activity, AlertTriangle, Clipboard, Phone, Shield, User } from "lucide-react";
 import type { PatientInfo } from "@/components/VoiceAssistant";
 import { useNavigate } from "react-router-dom";
+import { apiUrl } from "@/lib/api";
+import { toast } from "sonner";
+
+const LISTS_INVALIDATE = "vitals:invalidate-lists";
 
 type CallPhase = "idle" | "dialing" | "completed";
 
@@ -24,17 +28,17 @@ export default function SimulateCall() {
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [showPostCallPopup, setShowPostCallPopup] = useState(false);
   const [recentCallId, setRecentCallId] = useState<string | null>(null);
+  const [recentDbCallId, setRecentDbCallId] = useState<string | null>(null);
   const pollTimerRef = useRef<number | null>(null);
   const statusPollRef = useRef<number | null>(null);
   const lastEndedReasonRef = useRef<string | null>(null);
-  const syncAttemptedRef = useRef<string | null>(null);
+  const summaryDoneRef = useRef(false);
+  const pollCountRef = useRef(0);
 
-  async function syncCallToDatabase(vapiId: string | null) {
-    if (!session || !vapiId) return;
-    if (syncAttemptedRef.current === vapiId) return;
-    syncAttemptedRef.current = vapiId;
+  async function syncCallToDatabase(vapiId: string | null): Promise<string | null> {
+    if (!session || !vapiId) return null;
     try {
-      const resp = await fetch("http://localhost:4000/api/vapi/sync-call", {
+      const resp = await fetch(apiUrl("/api/vapi/sync-call"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -45,12 +49,22 @@ export default function SimulateCall() {
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
         pushDebug(`Sync to DB failed: ${data?.error || resp.status}`);
-        return;
+        toast.error(data?.error || "Could not save call — check API logs (Gemini / Supabase).");
+        return null;
       }
       if (data.duplicated) pushDebug("Sync: call already in database (webhook or prior sync).");
       else pushDebug(`Sync: stored call in database id ${data.callId || "ok"}`);
+      const dbId = typeof data.callId === "string" ? data.callId : null;
+      if (dbId) {
+        setRecentDbCallId(dbId);
+        window.dispatchEvent(new CustomEvent(LISTS_INVALIDATE));
+        toast.success("Call saved. Alerts and call log will refresh.");
+      }
+      return dbId;
     } catch (e) {
       pushDebug(`Sync error: ${e instanceof Error ? e.message : "unknown"}`);
+      toast.error("Sync request failed — is the API running?");
+      return null;
     }
   }
 
@@ -91,37 +105,33 @@ export default function SimulateCall() {
     return digits ? `${countryCode}${digits}` : "";
   }, [callerNumber, countryCode]);
 
-  async function buildSummaryFromDb(sinceMs?: number) {
-    if (!user || !selectedPatient) return null;
-    const { data: callsData } = await supabase
-      .from("calls")
-      .select("*")
-      .eq("docuuid", user.id)
-      .eq("patient_id", selectedPatient.id)
-      .order("created_at", { ascending: false })
-      .limit(1);
-    if (!callsData?.[0]) return null;
-    const call = callsData[0];
-    if (sinceMs) {
+  async function buildSummaryFromDb(opts?: { sinceMs?: number; vapiCallId?: string | null }) {
+    if (!session || !selectedPatient) return null;
+    const sinceMs = opts?.sinceMs;
+    const vapiCallId = opts?.vapiCallId || "";
+    const qs = new URLSearchParams({ patientId: selectedPatient.id });
+    if (vapiCallId) qs.set("vapiCallId", vapiCallId);
+
+    const listResp = await fetch(apiUrl(`/api/calls/list?${qs.toString()}`), {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    const listPayload = await listResp.json().catch(() => ({}));
+    if (!listResp.ok || !Array.isArray(listPayload.calls) || !listPayload.calls[0]) return null;
+    const call = listPayload.calls[0];
+
+    if (sinceMs != null) {
+      const slackMs = 20_000;
       const callTs = call.created_at ? new Date(call.created_at).getTime() : 0;
-      if (!callTs || callTs < sinceMs) return null;
+      if (!callTs || callTs < sinceMs - slackMs) return null;
     }
 
-    const { data: alertsData } = await supabase
-      .from("alerts")
-      .select("*")
-      .eq("docuuid", user.id)
-      .eq("patient_id", selectedPatient.id)
-      .order("created_at", { ascending: false })
-      .limit(1);
-    if (!alertsData?.[0]) return null;
-    const alert = alertsData[0];
-    if (sinceMs) {
-      const alertTs = alert.created_at ? new Date(alert.created_at).getTime() : 0;
-      if (!alertTs || alertTs < sinceMs) return null;
-    }
-
+    const rd = call.vitals_data?.ReportData as Record<string, any> | undefined;
     const vitals = (call.vitals_data || {}) as Record<string, any>;
+    const severity = String(rd?.risk_level || vitals.RiskLevel || "medium");
+    const alert_type = String(rd?.alert_type || vitals.AlertType || "");
+    const symptomsRaw = vitals.Symptoms ?? rd?.symptoms;
+    const symptoms = Array.isArray(symptomsRaw) ? symptomsRaw.map(String) : [];
+
     const vitalsOnly = Object.fromEntries(
       Object.entries(vitals).filter(
         ([k]) =>
@@ -149,13 +159,26 @@ export default function SimulateCall() {
           ].includes(k),
       ),
     );
+
+    const differentials = Array.isArray(vitals.DifferentialDiagnosis)
+      ? vitals.DifferentialDiagnosis.map(String)
+      : Array.isArray(rd?.differential_diagnosis)
+        ? rd.differential_diagnosis.map(String)
+        : [];
+
     return {
-      summary: vitals.Summary || "",
-      risk_level: alert.severity || "medium",
-      alert_type: alert.alert_type || "",
-      symptoms: vitals.Symptoms || [],
+      call_db_id: String(call.id),
+      summary: String(vitals.Summary || rd?.summary || ""),
+      risk_level: severity,
+      alert_type,
+      symptoms,
       vitals_data: vitalsOnly,
-      action_required: vitals.ActionRequired || "",
+      action_required: String(vitals.ActionRequired || rd?.action_required || ""),
+      diagnosis: String(vitals.Diagnosis || rd?.diagnosis || ""),
+      relevant_history: String(vitals.RelevantHistory || rd?.relevant_history || ""),
+      clinical_reasoning: String(vitals.ClinicalReasoning || rd?.clinical_reasoning || ""),
+      differential_diagnosis: differentials,
+      follow_up_plan: String(vitals.FollowUpPlan || rd?.follow_up_plan || ""),
     };
   }
 
@@ -170,12 +193,14 @@ export default function SimulateCall() {
     setCallStatus("dialing");
     setDebugLogs([]);
     lastEndedReasonRef.current = null;
-    syncAttemptedRef.current = null;
+    summaryDoneRef.current = false;
+    pollCountRef.current = 0;
+    setRecentDbCallId(null);
     pushDebug("Starting outbound call request");
 
     let createdCallId: string | null = null;
     try {
-      const resp = await fetch("http://localhost:4000/api/vapi/outbound-call", {
+      const resp = await fetch(apiUrl("/api/vapi/outbound-call"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -207,7 +232,7 @@ export default function SimulateCall() {
     statusPollRef.current = window.setInterval(async () => {
       if (!createdCallId) return;
       try {
-        const resp = await fetch(`http://localhost:4000/api/vapi/call/${createdCallId}`);
+        const resp = await fetch(apiUrl(`/api/vapi/call/${createdCallId}`));
         const data = await resp.json();
         if (!resp.ok) {
           pushDebug(`Status poll error: ${data?.error || "unknown error"}`);
@@ -225,17 +250,12 @@ export default function SimulateCall() {
         if (data?.status === "ended") {
           void syncCallToDatabase(createdCallId);
           setIsSaving(false);
-          if (!summaryData) {
-            setErrorMessage(endedReason ? `Call ended: ${endedReason}` : "Call ended.");
-          }
+          setErrorMessage(endedReason ? `Call ended: ${endedReason}` : "Call ended.");
           if (statusPollRef.current) {
             window.clearInterval(statusPollRef.current);
             statusPollRef.current = null;
           }
-          if (pollTimerRef.current && !summaryData) {
-            window.clearInterval(pollTimerRef.current);
-            pollTimerRef.current = null;
-          }
+          /* Keep pollTimerRef running until buildSummaryFromDb succeeds (sync + Gemini are async). */
         }
       } catch (err) {
         pushDebug(`Status poll failed: ${err instanceof Error ? err.message : "unknown"}`);
@@ -245,12 +265,31 @@ export default function SimulateCall() {
     const startedAt = Date.now();
     if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
     pollTimerRef.current = window.setInterval(async () => {
-      const summaryFromDb = await buildSummaryFromDb(startedAt);
+      if (summaryDoneRef.current) return;
+      pollCountRef.current += 1;
+      if (pollCountRef.current > 100) {
+        if (pollTimerRef.current) {
+          window.clearInterval(pollTimerRef.current);
+          pollTimerRef.current = null;
+        }
+        pushDebug("Timeout waiting for DB row — check API: sync-call, Gemini key, Supabase calls table");
+        toast.error("Timed out waiting for AI summary. Check debug logs and server console.");
+        setIsSaving(false);
+        return;
+      }
+      const summaryFromDb = await buildSummaryFromDb({
+        sinceMs: startedAt,
+        vapiCallId: createdCallId,
+      });
       if (!summaryFromDb) return;
+      summaryDoneRef.current = true;
       setSummaryData(summaryFromDb);
       setIsSaving(false);
       setPhase("completed");
+      setRecentDbCallId(summaryFromDb.call_db_id);
       pushDebug("Summary detected in DB, call flow completed");
+      window.dispatchEvent(new CustomEvent(LISTS_INVALIDATE));
+      toast.success("Clinical summary ready — check Call Logs and Alerts.");
       if (pollTimerRef.current) {
         window.clearInterval(pollTimerRef.current);
         pollTimerRef.current = null;
@@ -259,14 +298,14 @@ export default function SimulateCall() {
         window.clearInterval(statusPollRef.current);
         statusPollRef.current = null;
       }
-    }, 3000);
+    }, 2500);
   }
 
   async function handleHangUpOutbound() {
     if (!session || !vapiCallId) return;
     pushDebug(`Hangup requested for call ${vapiCallId}`);
     try {
-      const resp = await fetch(`http://localhost:4000/api/vapi/outbound-call/${vapiCallId}/hangup`, {
+      const resp = await fetch(apiUrl(`/api/vapi/outbound-call/${vapiCallId}/hangup`), {
         method: "POST",
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
@@ -278,19 +317,43 @@ export default function SimulateCall() {
         return;
       }
       pushDebug("Hangup succeeded");
-      void syncCallToDatabase(vapiCallId);
+      summaryDoneRef.current = false;
+      pollCountRef.current = 0;
+      const hangupT0 = Date.now();
+      await syncCallToDatabase(vapiCallId);
       if (statusPollRef.current) {
         window.clearInterval(statusPollRef.current);
         statusPollRef.current = null;
       }
-      if (pollTimerRef.current) {
-        window.clearInterval(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
+      if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = window.setInterval(async () => {
+        if (summaryDoneRef.current) return;
+        pollCountRef.current += 1;
+        if (pollCountRef.current > 80) {
+          if (pollTimerRef.current) {
+            window.clearInterval(pollTimerRef.current);
+            pollTimerRef.current = null;
+          }
+          setShowPostCallPopup(true);
+          return;
+        }
+        const s = await buildSummaryFromDb({ sinceMs: hangupT0 - 25_000, vapiCallId });
+        if (!s) return;
+        summaryDoneRef.current = true;
+        setSummaryData(s);
+        setRecentDbCallId(s.call_db_id);
+        setPhase("completed");
+        window.dispatchEvent(new CustomEvent(LISTS_INVALIDATE));
+        toast.success("Call analysis ready.");
+        if (pollTimerRef.current) {
+          window.clearInterval(pollTimerRef.current);
+          pollTimerRef.current = null;
+        }
+      }, 2500);
       setCallStatus("ended");
       setIsSaving(false);
       setPhase("idle");
-      setShowPostCallPopup(true);
+      setShowPostCallPopup(false);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Hangup failed";
       setErrorMessage(msg);
@@ -404,9 +467,21 @@ export default function SimulateCall() {
           <div className="w-full max-w-lg bg-card border-2 border-border rounded-2xl p-6 shadow-soft space-y-4">
             <h3 className="text-2xl font-heading font-extrabold">Call Ended</h3>
             <p className="text-sm text-muted-foreground font-medium">
-              Open Alerts to review call details, approve/deny doctor decision, and download prescription-style PDF report.
+              Open the call log or alerts for this patient — data loads from the database after sync (not static).
             </p>
-            <div className="flex gap-3">
+            <div className="flex flex-wrap gap-3">
+              {recentDbCallId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPostCallPopup(false);
+                    navigate(`/dashboard/calls/${recentDbCallId}`);
+                  }}
+                  className="px-4 py-3 rounded-xl border-2 border-foreground bg-quaternary text-white font-bold"
+                >
+                  Open call detail
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {
@@ -414,13 +489,13 @@ export default function SimulateCall() {
                   navigate("/dashboard/alerts", {
                     state: {
                       focusPatientId: selectedPatientId,
-                      focusCallId: recentCallId,
+                      focusCallId: recentDbCallId || recentCallId,
                     },
                   });
                 }}
-                className="px-4 py-3 rounded-xl border-2 border-foreground bg-quaternary text-white font-bold"
+                className="px-4 py-3 rounded-xl border-2 border-foreground bg-secondary text-white font-bold"
               >
-                View Details
+                Open alerts
               </button>
               <button
                 type="button"
@@ -484,7 +559,9 @@ export default function SimulateCall() {
                     </div>
                     <div>
                        <h2 className="text-3xl font-heading font-black uppercase tracking-tight text-white border-none bg-transparent m-0 leading-none">Clinical Assessment</h2>
-                       <p className="font-bold opacity-80 uppercase text-xs tracking-widest text-white border-none bg-transparent mt-2">Demo Report Generation Successful</p>
+                       <p className="font-bold opacity-80 uppercase text-xs tracking-widest text-white border-none bg-transparent mt-2">
+                         {summaryData.alert_type || "AI chart review — live data"}
+                       </p>
                     </div>
                  </div>
                  <div className={`px-6 py-3 rounded-2xl border-2 border-white/50 backdrop-blur-md font-black italic text-xl uppercase ${summaryData.risk_level === 'high' ? 'bg-destructive ring-4 ring-destructive/30' : 'bg-primary'}`}>
@@ -503,34 +580,84 @@ export default function SimulateCall() {
                  <div className="grid md:grid-cols-2 gap-8">
                     <div className="p-6 bg-muted/40 rounded-3xl border-2 border-border space-y-4 text-left">
                        <h4 className="flex items-center gap-2 text-muted-foreground font-black uppercase tracking-widest text-sm border-none bg-transparent">
-                          <AlertTriangle className="w-4 h-4 text-secondary" /> Diagnostic Alerts
+                          <AlertTriangle className="w-4 h-4 text-secondary" /> Triage / alert title
                        </h4>
-                       <div className="p-4 bg-white border-2 border-border rounded-2xl font-black text-xl text-secondary shadow-pop uppercase italic">
-                          {summaryData.alert_type}
+                       <div className="p-4 bg-white border-2 border-border rounded-2xl font-black text-lg text-secondary shadow-pop uppercase italic">
+                          {summaryData.alert_type || "—"}
                        </div>
                     </div>
                     
                     <div className="p-6 bg-muted/40 rounded-3xl border-2 border-border space-y-4 text-left">
                        <h4 className="flex items-center gap-2 text-muted-foreground font-black uppercase tracking-widest text-sm border-none bg-transparent">
-                          <Clipboard className="w-4 h-4 text-primary" /> Observed Symptoms
+                          <Clipboard className="w-4 h-4 text-primary" /> Symptoms (from call + chart)
                        </h4>
                        <div className="flex flex-wrap gap-2">
-                          {summaryData.symptoms.map((s: string, i: number) => (
+                          {summaryData.symptoms?.length ? (
+                            summaryData.symptoms.map((s: string, i: number) => (
                              <span key={i} className="px-3 py-1 bg-white border-2 border-border rounded-full font-bold text-sm">
                                 {s}
                              </span>
-                          ))}
+                            ))
+                          ) : (
+                            <span className="text-sm text-muted-foreground font-medium">No symptom list returned — see summary above.</span>
+                          )}
                        </div>
                     </div>
                  </div>
 
-                 <div className="p-8 bg-muted/80 rounded-3xl border-2 border-border grid grid-cols-3 gap-6">
-                    {Object.entries(summaryData.vitals_data).map(([key, val]: any) => (
+                 {(summaryData.diagnosis || summaryData.relevant_history) && (
+                   <div className="grid md:grid-cols-2 gap-6 text-left">
+                     <div className="p-6 rounded-3xl border-2 border-border bg-background space-y-2">
+                       <h4 className="text-xs font-black uppercase tracking-widest text-muted-foreground">Working impression / diagnosis</h4>
+                       <p className="text-lg font-bold leading-snug">{summaryData.diagnosis || "—"}</p>
+                     </div>
+                     <div className="p-6 rounded-3xl border-2 border-border bg-background space-y-2">
+                       <h4 className="text-xs font-black uppercase tracking-widest text-muted-foreground">Relevant history</h4>
+                       <p className="text-sm font-medium leading-relaxed text-foreground">{summaryData.relevant_history || "—"}</p>
+                     </div>
+                   </div>
+                 )}
+
+                 {summaryData.clinical_reasoning ? (
+                   <div className="p-6 rounded-3xl border-2 border-dashed border-border bg-muted/30 text-left space-y-2">
+                     <h4 className="text-xs font-black uppercase tracking-widest text-muted-foreground">Clinical reasoning</h4>
+                     <p className="text-sm font-medium leading-relaxed">{summaryData.clinical_reasoning}</p>
+                   </div>
+                 ) : null}
+
+                 {summaryData.differential_diagnosis?.length ? (
+                   <div className="text-left space-y-2">
+                     <h4 className="text-xs font-black uppercase tracking-widest text-muted-foreground">Differential diagnoses</h4>
+                     <div className="flex flex-wrap gap-2">
+                       {summaryData.differential_diagnosis.map((d: string, i: number) => (
+                         <span key={i} className="px-3 py-1 rounded-full border-2 border-border bg-card text-sm font-bold">
+                           {d}
+                         </span>
+                       ))}
+                     </div>
+                   </div>
+                 ) : null}
+
+                 {summaryData.follow_up_plan ? (
+                   <div className="p-6 rounded-3xl border-2 border-border bg-muted/20 text-left">
+                     <h4 className="text-xs font-black uppercase tracking-widest text-muted-foreground mb-2">Follow-up plan</h4>
+                     <p className="text-sm font-medium">{summaryData.follow_up_plan}</p>
+                   </div>
+                 ) : null}
+
+                 <div className="p-8 bg-muted/80 rounded-3xl border-2 border-border grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {Object.keys(summaryData.vitals_data || {}).length === 0 ? (
+                      <p className="col-span-full text-center text-sm text-muted-foreground font-medium py-4">
+                        No extra vitals key/value pairs from the model for this call.
+                      </p>
+                    ) : (
+                    Object.entries(summaryData.vitals_data).map(([key, val]: any) => (
                        <div key={key} className="text-center p-3 bg-white rounded-2xl border-2 border-border shadow-soft">
                           <p className="text-[10px] font-black uppercase text-muted-foreground mb-1 tracking-tighter">{key.replace('_',' ')}</p>
-                          <p className="text-lg font-black text-foreground">{val}</p>
+                          <p className="text-lg font-black text-foreground">{String(val)}</p>
                        </div>
-                    ))}
+                    ))
+                    )}
                  </div>
 
                  <div className="p-8 bg-secondary/5 rounded-3xl border-4 border-dashed border-secondary/30 flex items-center justify-between text-left">
@@ -542,18 +669,29 @@ export default function SimulateCall() {
                  </div>
               </div>
 
-              <div className="p-8 bg-muted border-t-4 border-border flex gap-4">
+              <div className="p-8 bg-muted border-t-4 border-border flex flex-wrap gap-4">
+                 {summaryData?.call_db_id && (
+                   <button
+                     type="button"
+                     onClick={() => navigate(`/dashboard/calls/${summaryData.call_db_id}`)}
+                     className="px-8 py-5 bg-quaternary text-white font-heading font-black uppercase rounded-2xl border-4 border-foreground shadow-pop hover:-translate-y-1 transition-all"
+                   >
+                     Full call log
+                   </button>
+                 )}
                  <button 
+                 type="button"
                  onClick={() => {
                    setPhase("idle");
                    setSummaryData(null);
                    setVapiCallId(null);
                  }} 
-                  className="flex-1 py-5 bg-white text-foreground font-heading font-black uppercase rounded-2xl border-4 border-foreground shadow-pop hover:-translate-y-1 transition-all flex items-center justify-center gap-2"
+                  className="flex-1 min-w-[140px] py-5 bg-white text-foreground font-heading font-black uppercase rounded-2xl border-4 border-foreground shadow-pop hover:-translate-y-1 transition-all flex items-center justify-center gap-2"
                  >
                     New Call
                  </button>
                  <button 
+                 type="button"
                  onClick={() => setPhase("idle")} 
                  className="px-10 py-5 bg-tertiary text-foreground font-heading font-black uppercase rounded-2xl border-4 border-foreground shadow-pop hover:-translate-y-1 transition-all"
                  >

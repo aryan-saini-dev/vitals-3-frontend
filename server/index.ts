@@ -430,7 +430,103 @@ function generateReportPdfBuffer(input: {
   });
 }
 
+/**
+ * Step 1 of the report pipeline:
+ * Clean a raw (possibly multilingual) transcript into structured English-only text.
+ * Preserves speaker roles (Patient / Agent), removes filler words, normalises medical terms,
+ * and translates any non-English segments into English.
+ */
+async function cleanTranscriptToEnglish(rawTranscript: string): Promise<string> {
+  const geminiApiKey =
+    process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "";
+  if (!geminiApiKey) throw new Error("Missing Gemini API key env var");
+  const genAI = new GoogleGenerativeAI(geminiApiKey);
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+  const prompt = `You are a medical transcript processor. Your job is to take a raw call transcript that may contain:
+- Multiple languages (Hindi, Spanish, regional dialects, etc.)
+- Filler words (um, uh, hmm, like, you know)
+- Repetitions and false starts
+- Unclear formatting
+
+Process the transcript through these steps and output ONLY the cleaned result:
+
+1. **Translate**: Convert ALL non-English segments into fluent, natural English. Preserve the medical/clinical meaning precisely.
+2. **Clean**: Remove filler words, stutters, false starts, and repetitions.
+3. **Preserve roles**: Keep speaker labels exactly as "Patient:" or "Agent:" at the start of each turn.
+4. **Medical accuracy**: Keep all medical terms, drug names, dosages, vitals, symptoms, and clinical details EXACTLY as stated. Do NOT paraphrase medical content.
+5. **Formatting**: One speaker turn per paragraph, separated by blank lines. Keep it chronological.
+6. **If the transcript is already clean English**: Return it as-is with only minor formatting fixes.
+
+IMPORTANT: Output ONLY the cleaned transcript text. No commentary, no preamble, no wrapper. Just the cleaned conversation.
+
+Raw transcript:
+${rawTranscript}`;
+
+  const result = await model.generateContent(prompt);
+  const cleaned = result.response.text().trim();
+  console.log(
+    "[TranscriptCleaner] raw chars:", rawTranscript.length,
+    "→ cleaned chars:", cleaned.length,
+  );
+  return cleaned;
+}
+
+/**
+ * Step 2 of the report pipeline:
+ * Generate a well-structured clinical report from a CLEANED English transcript + patient chart.
+ * This is a more detailed version of generateDoctorSummaryServer, designed for on-demand
+ * report generation from the CallDetail page.
+ */
+async function generateStructuredReport(cleanedTranscript: string, patientChartJson: string) {
+  const geminiApiKey =
+    process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "";
+  if (!geminiApiKey) throw new Error("Missing Gemini API key env var");
+  const genAI = new GoogleGenerativeAI(geminiApiKey);
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+  const prompt = `You are an expert clinical documentation specialist generating a structured medical report from a voice call between an AI health agent and a patient.
+
+## Inputs
+
+Patient chart (may be partial):
+${patientChartJson || "{}"}
+
+Cleaned call transcript:
+${cleanedTranscript}
+
+## Instructions
+
+Analyze BOTH the patient chart and the cleaned transcript thoroughly. Generate a comprehensive, well-structured clinical report.
+
+CRITICAL RULES:
+- Every symptom MUST be directly traceable to something the PATIENT said in the transcript.
+- Do NOT invent symptoms or findings not mentioned by the patient.
+- If the transcript is empty or contains no patient dialogue, say so explicitly.
+- All clinical reasoning must reference specific patient statements.
+- Use professional medical terminology appropriate for a licensed clinician's review.
+
+Output ONLY a JSON object with this exact shape (no markdown outside JSON):
+{
+  "summary": "3-5 sentence comprehensive clinical summary. Include: reason for call, key findings, and current patient status. Written as a professional handoff note.",
+  "relevant_history": "Prior conditions, medications, allergies, and relevant history from the chart. Cross-reference with what the patient mentioned about their history during the call. Note any discrepancies.",
+  "diagnosis": "Working clinical impression based on the transcript and chart data. State confidence level (strong suspicion / possible / unlikely but consider). This is NOT a definitive diagnosis.",
+  "clinical_reasoning": "4-8 sentences of structured reasoning: (1) What symptoms point toward this impression, (2) What from the chart supports it, (3) What contradicts or complicates it, (4) Red flags or concerning patterns. Reference specific patient statements.",
+  "differential_diagnosis": ["Differential 1 with brief rationale", "Differential 2 with brief rationale", "Differential 3 if applicable"],
+  "risk_level": "high" | "medium" | "low",
+  "alert_type": "Specific triage classification (e.g., 'Acute chest pain — rule out ACS', 'Routine diabetes follow-up — well controlled', 'Medication non-compliance — moderate risk')",
+  "symptoms": ["Each symptom as a concise clinical bullet. Format: 'Symptom — patient stated: [brief quote or paraphrase]'. Must be grounded in transcript."],
+  "vitals_data": {"Include any vitals or measurements the patient reported during the call, e.g. BP, HR, glucose, temperature, weight. Use standard clinical keys."},
+  "action_required": "Specific, actionable next steps for the care team. Include: (1) Immediate actions, (2) Tests or labs to order, (3) Medication changes if indicated, (4) Referrals needed.",
+  "follow_up_plan": "Structured plan: (1) Follow-up timeline, (2) What to monitor, (3) Patient education points discussed or needed, (4) Escalation criteria — when to seek emergency care."
+}`;
+
+  const result = await model.generateContent(prompt);
+  return parseJsonFromModelText(result.response.text());
+}
+
 async function generateDoctorSummaryServer(transcript: string, patientChartJson: string) {
+
   const geminiApiKey =
     process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "";
   if (!geminiApiKey) throw new Error("Missing Gemini API key env var");
@@ -499,27 +595,10 @@ function extractSymptomsFromPatientLines(transcript: string): string[] {
   return [...new Set(out.map((s) => s.trim()))].filter(Boolean).slice(0, 15);
 }
 
-/** Prefer AI-extracted symptom labels, then add anything clearly stated by the patient that is not already covered. */
+/** Return AI-extracted symptom labels and prevent appending raw transcript sentences. */
 function mergeSymptomsFromTranscript(aiSymptoms: string[], transcript: string): string[] {
-  const fromPatient = extractSymptomsFromPatientLines(transcript);
   const merged: string[] = aiSymptoms.map((s) => s.trim()).filter(Boolean);
-  if (!fromPatient.length) return merged.length ? merged : [];
-
-  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
-  for (const lineSym of fromPatient) {
-    const ln = norm(lineSym);
-    const dup = merged.some((m) => {
-      const mn = norm(m);
-      return mn.includes(ln) || ln.includes(mn) || mn.slice(0, 40) === ln.slice(0, 40);
-    });
-    if (!dup) merged.push(lineSym);
-  }
-  const out = merged.slice(0, 20);
-  const onlyGeneric =
-    out.length === 1 &&
-    /no acute|no transcript|routine check-in|verify recording/i.test(out[0] || "");
-  if (onlyGeneric && fromPatient.length) return fromPatient.slice(0, 15);
-  return out;
+  return merged;
 }
 
 function effectiveCallTranscript(call: { transcript?: string | null; vitals_data?: any }): string {
@@ -702,6 +781,65 @@ app.get("/api/vapi/call/:callId", async (req, res) => {
   } catch (e: any) {
     console.error("[CallStatus] fatal error:", e);
     return res.status(500).json({ error: e?.message || "Call status failed" });
+  }
+});
+
+/**
+ * GET /api/vapi/call/:callId/transcript
+ * Fetches a single call from Vapi and returns only the transcript text.
+ * Uses the same helper functions as the rest of the Vapi integration —
+ * does NOT affect any existing routes or the webhook pipeline.
+ */
+app.get("/api/vapi/call/:callId/transcript", async (req, res) => {
+  try {
+    const { callId } = req.params;
+    if (!callId) {
+      return res.status(400).json({ error: "callId is required" });
+    }
+
+    // Vapi requires a valid UUID — reject placeholder IDs (e.g. "unknown-<timestamp>") early
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRe.test(callId)) {
+      console.warn("[TranscriptFetch] non-UUID callId skipped:", callId);
+      return res.status(400).json({
+        error: "callId must be a valid UUID (Vapi call IDs are UUIDs).",
+        callId,
+      });
+    }
+    const vapiApiKey = requireEnv("VAPI_API_KEY");
+    const resp = await fetch(`https://api.vapi.ai/call/${callId}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${vapiApiKey}`,
+      },
+    });
+
+    const body = await resp.json().catch(() => ({}));
+
+    if (!resp.ok) {
+      console.error("[TranscriptFetch] Vapi error:", body);
+      return res.status(resp.status).json({
+        error: body?.message || "Failed to fetch call from Vapi",
+        provider: body,
+      });
+    }
+
+    const call = unwrapVapiCallResponse(body) || {};
+    const transcript = buildTranscriptFromVapiCall(call);
+
+    console.log(
+      "[TranscriptFetch] callId:", callId,
+      "| transcript chars:", transcript.length,
+    );
+
+    return res.json({
+      callId,
+      transcript: transcript || "No transcript found.",
+      hasTranscript: transcript.length > 0,
+    });
+  } catch (e: any) {
+    console.error("[TranscriptFetch] error:", e);
+    return res.status(500).json({ error: e?.message || "Transcript fetch failed" });
   }
 });
 
@@ -1219,7 +1357,168 @@ app.post("/api/calls/:callId/decision", async (req, res) => {
   }
 });
 
+/**
+ * POST /api/calls/:callId/generate-report
+ *
+ * On-demand report generation pipeline for the CallDetail page:
+ *  1. Fetch the live transcript (prefer Vapi live → stored fallback).
+ *  2. Clean & translate the transcript to English via Gemini.
+ *  3. Generate a structured clinical report from cleaned transcript + patient chart.
+ *  4. Persist both the cleaned transcript and the new report into the call's vitals_data.
+ *
+ * Accepts optional body: { transcript?: string } — the frontend can forward
+ * the transcript it already has to avoid a redundant Vapi round-trip.
+ *
+ * Does NOT affect any existing routes or the webhook pipeline.
+ */
+app.post("/api/calls/:callId/generate-report", async (req, res) => {
+  try {
+    const { callId } = req.params;
+    const authHeader = String(req.headers.authorization || "");
+    const accessToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+    if (!accessToken) return res.status(401).json({ error: "Missing Authorization Bearer token" });
+    const authCtx = await authenticateRequest(accessToken);
+    if (!authCtx) return res.status(401).json({ error: "Invalid token" });
+    const { userId, supabase } = authCtx;
+
+    // 1. Load the call from DB
+    const { data: call, error: callErr } = await supabase
+      .from("calls")
+      .select("*")
+      .eq("id", callId)
+      .eq("docuuid", userId)
+      .single();
+    if (callErr || !call) return res.status(404).json({ error: "Call not found" });
+
+    // 2. Resolve transcript: prefer body.transcript (frontend already has it) → stored in DB
+    const bodyTranscript = String((req.body as any)?.transcript || "").trim();
+    let rawTranscript = bodyTranscript || effectiveCallTranscript(call);
+
+    // If still empty, try fetching live from Vapi
+    const storedVapiId = String(call.vitals_data?.VapiCallId || "").trim();
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!rawTranscript && storedVapiId && uuidRe.test(storedVapiId)) {
+      try {
+        const vapiApiKey = requireEnv("VAPI_API_KEY");
+        const vapiResp = await fetch(`https://api.vapi.ai/call/${storedVapiId}`, {
+          headers: { Authorization: `Bearer ${vapiApiKey}` },
+        });
+        if (vapiResp.ok) {
+          const vapiBody = unwrapVapiCallResponse(await vapiResp.json().catch(() => ({})));
+          rawTranscript = buildTranscriptFromVapiCall(vapiBody);
+        }
+      } catch (e) {
+        console.warn("[GenerateReport] Vapi live fetch failed, using stored:", e);
+      }
+    }
+
+    if (!rawTranscript) {
+      return res.status(400).json({
+        error: "No transcript available for this call. Cannot generate report without a transcript.",
+      });
+    }
+
+    console.log("[GenerateReport] starting pipeline for call:", callId, "| raw transcript chars:", rawTranscript.length);
+
+    // 3. Step 1 — Clean & translate the transcript to English
+    const cleanedTranscript = await cleanTranscriptToEnglish(rawTranscript);
+
+    // 4. Gather patient chart for context
+    const { data: patientRow } = call.patient_id
+      ? await supabase.from("patients").select("*").eq("id", call.patient_id).eq("docuuid", userId).single()
+      : { data: null };
+
+    const chartJson = JSON.stringify(
+      patientRow
+        ? {
+            name: patientRow.name,
+            condition: patientRow.condition,
+            age: patientRow.age,
+            risk_level: patientRow.risk_level,
+            date_of_birth: patientRow.date_of_birth,
+          }
+        : {},
+    );
+
+    // 5. Step 2 — Generate the structured clinical report from cleaned transcript
+    const reportRaw = await generateStructuredReport(cleanedTranscript, chartJson);
+    const report = normalizeReportData(reportRaw);
+    const symptoms = mergeSymptomsFromTranscript(report.symptoms, cleanedTranscript);
+
+    console.log("[GenerateReport] report generated | risk:", report.risk_level, "| symptoms:", symptoms.length);
+
+    // 6. Persist the cleaned transcript + new report into vitals_data
+    const updatedVitals = {
+      ...(call.vitals_data || {}),
+      CleanedTranscript: cleanedTranscript,
+      ReportData: { ...report, symptoms },
+      Summary: report.summary,
+      Diagnosis: report.diagnosis,
+      Symptoms: symptoms,
+      RelevantHistory: report.relevant_history,
+      ClinicalReasoning: report.clinical_reasoning,
+      DifferentialDiagnosis: report.differential_diagnosis,
+      FollowUpPlan: report.follow_up_plan,
+      ActionRequired: report.action_required,
+      ReportGeneratedAt: new Date().toISOString(),
+      ReportPipeline: "clean-then-generate",
+    };
+
+    const { error: updateErr } = await supabase
+      .from("calls")
+      .update({
+        transcript: cleanedTranscript,
+        vitals_data: updatedVitals,
+      })
+      .eq("id", callId)
+      .eq("docuuid", userId);
+
+    if (updateErr) {
+      console.error("[GenerateReport] DB update failed:", updateErr);
+      return res.status(500).json({ error: updateErr.message });
+    }
+
+    // 7. Also update the matching alert severity if one exists
+    if (call.patient_id) {
+      const { data: alertRow } = await supabase
+        .from("alerts")
+        .select("id")
+        .eq("docuuid", userId)
+        .eq("patient_id", call.patient_id)
+        .eq("status", "open")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (alertRow?.id) {
+        await supabase
+          .from("alerts")
+          .update({
+            alert_type: report.alert_type,
+            severity: report.risk_level,
+          })
+          .eq("id", alertRow.id)
+          .eq("docuuid", userId);
+      }
+    }
+
+    console.log("[GenerateReport] done for call:", callId);
+
+    return res.json({
+      ok: true,
+      cleanedTranscript,
+      report: { ...report, symptoms },
+    });
+  } catch (e: any) {
+    console.error("[GenerateReport] error:", e);
+    return res.status(500).json({ error: e?.message || "Report generation failed" });
+  }
+});
+
 app.post("/api/vapi/webhook", async (req, res) => {
+
   try {
     const secret = process.env.VAPI_WEBHOOK_SECRET;
     if (secret) {

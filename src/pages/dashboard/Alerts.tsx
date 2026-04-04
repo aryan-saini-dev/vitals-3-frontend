@@ -111,8 +111,8 @@ export default function Alerts() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
          <div>
-           <h1 className="text-4xl font-heading font-extrabold text-foreground tracking-tight">Triage & Alerts</h1>
-           <p className="mt-2 text-muted-foreground font-medium">Real-time flags raised by your AI agents during check-ins.</p>
+           <h1 className="text-3xl sm:text-4xl font-heading font-extrabold text-foreground tracking-tight">Triage & Alerts</h1>
+           <p className="mt-1.5 text-muted-foreground font-medium text-sm sm:text-base">Real-time flags raised by your AI agents during check-ins.</p>
          </div>
       </div>
 
@@ -154,21 +154,21 @@ export default function Alerts() {
              return (
               <div
                 key={alert.id}
-                className={`p-6 rounded-xl transition-all duration-300 relative overflow-hidden group ${highlightColor} ${isFocusedFromCallFlow ? "ring-4 ring-primary/50" : ""}`}
+                className={`p-4 sm:p-6 rounded-xl transition-all duration-300 relative overflow-hidden group ${highlightColor} ${isFocusedFromCallFlow ? "ring-4 ring-primary/50" : ""}`}
               >
                 
                 {isValidHigh && <div className="absolute top-0 right-0 w-32 h-32 bg-white opacity-10 rounded-full blur-xl pointer-events-none translate-x-1/2 -translate-y-1/2"></div>}
                 
-                <div className="flex flex-col md:flex-row gap-6 justify-between items-start md:items-center relative z-10">
+                <div className="flex flex-col gap-5 sm:gap-6 relative z-10">
                   <div>
-                    <div className="flex items-center gap-3 mb-3">
-                       <span className={`px-4 py-1.5 text-xs font-bold uppercase tracking-widest rounded-full shadow-[2px_2px_0_0_rgba(30,41,59,0.3)] ${pillColor}`}>
+                    <div className="flex flex-wrap items-center gap-2 sm:gap-3 mb-2 sm:mb-3">
+                       <span className={`px-3 py-1 text-xs font-bold uppercase tracking-widest rounded-full shadow-[2px_2px_0_0_rgba(30,41,59,0.3)] ${pillColor}`}>
                          {alert.severity} Priority
                        </span>
-                       <span className={`text-sm font-bold uppercase tracking-widest ${isValidHigh ? 'text-white/80' : 'text-muted-foreground'}`}>{new Date(alert.created_at).toLocaleString()}</span>
+                       <span className={`text-xs font-bold uppercase tracking-widest ${isValidHigh ? 'text-white/80' : 'text-muted-foreground'}`}>{new Date(alert.created_at).toLocaleString()}</span>
                     </div>
                     
-                    <h3 className={`text-2xl font-heading font-extrabold mb-2 tracking-tight ${isValidHigh ? 'text-white' : 'text-foreground'}`}>{alert.alert_type}</h3>
+                    <h3 className={`text-xl sm:text-2xl font-heading font-extrabold mb-1.5 tracking-tight ${isValidHigh ? 'text-white' : 'text-foreground'}`}>{alert.alert_type}</h3>
                     
                     <p className={`font-medium text-base ${isValidHigh ? 'text-white/90' : 'text-muted-foreground'}`}>
                       Patient: <Link to={`/dashboard/patients/${alert.patient_id}`} className={`font-bold underline decoration-2 underline-offset-4 ${isValidHigh ? 'hover:text-white' : 'hover:text-accent'}`}>
@@ -188,32 +188,32 @@ export default function Alerts() {
                     )}
                   </div>
                   
-                  <div className="shrink-0 flex items-center justify-end w-full md:w-auto">
+                  <div className="shrink-0 flex items-start sm:items-center justify-start w-full">
                      {isOpen ? (
-                       <div className="flex flex-wrap justify-end gap-2">
+                       <div className="flex flex-wrap gap-2">
                         {alert.call && (
                           <>
                             <button
                               onClick={(e) => setDecision(alert.call.id, "approved", e)}
-                              className="inline-flex items-center justify-center gap-2 h-11 px-4 font-bold text-sm rounded-xl border-2 border-border bg-emerald-100"
+                              className="inline-flex items-center justify-center gap-1.5 h-10 px-3 font-bold text-xs rounded-xl border-2 border-border bg-emerald-100 hover:bg-emerald-200 transition-colors"
                             >
                               Approve
                             </button>
                             <button
                               onClick={(e) => setDecision(alert.call.id, "denied", e)}
-                              className="inline-flex items-center justify-center gap-2 h-11 px-4 font-bold text-sm rounded-xl border-2 border-border bg-rose-100"
+                              className="inline-flex items-center justify-center gap-1.5 h-10 px-3 font-bold text-xs rounded-xl border-2 border-border bg-rose-100 hover:bg-rose-200 transition-colors"
                             >
                               Deny
                             </button>
                             <button
                               onClick={(e) => downloadReport(alert.call.id, e)}
-                              className="inline-flex items-center justify-center gap-2 h-11 px-4 font-bold text-sm rounded-xl border-2 border-border bg-background"
+                              className="inline-flex items-center justify-center gap-1.5 h-10 px-3 font-bold text-xs rounded-xl border-2 border-border bg-background hover:bg-muted transition-colors"
                             >
                               Download PDF
                             </button>
                             <Link
                               to={`/dashboard/calls/${alert.call.id}`}
-                              className="inline-flex items-center justify-center gap-2 h-11 px-4 font-bold text-sm rounded-xl border-2 border-border bg-quaternary text-white"
+                              className="inline-flex items-center justify-center gap-1.5 h-10 px-3 font-bold text-xs rounded-xl border-2 border-border bg-quaternary text-white"
                             >
                               View Details
                             </Link>
@@ -221,14 +221,14 @@ export default function Alerts() {
                         )}
                         <button 
                           onClick={(e) => markResolved(alert.id, e)}
-                          className={`inline-flex items-center justify-center gap-3 h-11 px-4 font-heading font-extrabold text-sm uppercase tracking-wide rounded-xl border-2 transition-all shadow-[4px_4px_0_0_#1E293B] hover:-translate-y-1 active:translate-y-0 active:shadow-[2px_2px_0_0_#1E293B] ${isValidHigh ? 'bg-white text-secondary border-transparent hover:bg-muted' : 'bg-background text-foreground border-border hover:bg-muted font-bold'}`}
+                          className={`inline-flex items-center justify-center gap-2 h-10 px-3 font-heading font-extrabold text-xs uppercase tracking-wide rounded-xl border-2 transition-all shadow-[3px_3px_0_0_#1E293B] hover:-translate-y-0.5 active:translate-y-0 active:shadow-[1px_1px_0_0_#1E293B] ${isValidHigh ? 'bg-white text-secondary border-transparent hover:bg-muted' : 'bg-background text-foreground border-border hover:bg-muted'}`}
                         >
-                          <CheckCircle2 className="w-5 h-5" strokeWidth={2.5}/> Resolve
+                          <CheckCircle2 className="w-4 h-4" strokeWidth={2.5}/> Resolve
                         </button>
                        </div>
                      ) : (
-                        <span className="inline-flex items-center gap-2 px-6 py-3 bg-background border-2 border-border rounded-full text-sm font-bold uppercase text-muted-foreground tracking-widest">
-                          <CheckCircle2 className="w-5 h-5" /> {isApproved ? "Approved" : isDenied ? "Denied" : "Resolved"}
+                        <span className="inline-flex items-center gap-2 px-4 py-2 bg-background border-2 border-border rounded-full text-xs font-bold uppercase text-muted-foreground tracking-widest">
+                          <CheckCircle2 className="w-4 h-4" /> {isApproved ? "Approved" : isDenied ? "Denied" : "Resolved"}
                         </span>
                      )}
                   </div>

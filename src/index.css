@@ -100,10 +100,23 @@
   body {
     @apply bg-background text-foreground;
     font-family: var(--font-body);
+    min-height: 100dvh;
+    overflow-x: hidden;
   }
 
   h1, h2, h3, h4, h5, h6 {
     font-family: var(--font-heading);
+    overflow-wrap: break-word;
+  }
+
+  /* Smooth scrolling everywhere */
+  html {
+    scroll-behavior: smooth;
+  }
+
+  /* Better touch tap targets */
+  button, a {
+    min-height: 36px;
   }
 }
 
@@ -128,6 +141,21 @@
   }
   .arch-radius {
     border-radius: 9999px 9999px 0 0;
+  }
+  /* Thin custom scrollbar for transcript panels */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 5px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 9999px;
   }
 }
 

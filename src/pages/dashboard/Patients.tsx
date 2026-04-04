@@ -46,13 +46,13 @@ export default function Patients() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
          <div>
-           <h1 className="text-4xl font-heading font-extrabold text-foreground tracking-tight">Patients</h1>
-           <p className="mt-2 text-muted-foreground font-medium">Manage and monitor individuals under your care.</p>
+           <h1 className="text-3xl sm:text-4xl font-heading font-extrabold text-foreground tracking-tight">Patients</h1>
+           <p className="mt-1.5 text-muted-foreground font-medium text-sm sm:text-base">Manage and monitor individuals under your care.</p>
          </div>
-         <Link to="/dashboard/patients/add" className="inline-flex items-center justify-center gap-2 h-12 px-6 bg-accent text-white font-heading font-bold rounded-full border-2 border-border shadow-pop hover:-translate-y-1 hover:-translate-x-1 hover:shadow-pop-hover active:translate-y-1 active:translate-x-1 active:shadow-pop-active transition-all whitespace-nowrap">
-            <Plus className="w-5 h-5" /> Add Patient
+         <Link to="/dashboard/patients/add" className="self-start shrink-0 inline-flex items-center justify-center gap-2 h-10 sm:h-12 px-4 sm:px-6 bg-accent text-white font-heading font-bold rounded-full border-2 border-border shadow-pop hover:-translate-y-1 hover:-translate-x-1 hover:shadow-pop-hover active:translate-y-1 active:translate-x-1 active:shadow-pop-active transition-all whitespace-nowrap text-sm">
+            <Plus className="w-4 h-4 sm:w-5 sm:h-5" /> Add Patient
          </Link>
       </div>
 
